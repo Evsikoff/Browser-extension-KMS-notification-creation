@@ -47,27 +47,39 @@ async function kmsStep(step, payload) {
       '.remirror-editor-wrapper .ProseMirror[contenteditable="true"]'
     ) || document.querySelector('.ProseMirror[contenteditable="true"]');
 
-  // Текст строки с якорем: содержимое ближайшего блока без самих якорей
-  function anchorLineText(anchor) {
-    const block =
-      anchor.closest('h1, h2, h3, h4, h5, h6, p, li, td, th') ||
-      anchor.parentElement;
+  // Текст блока без служебных якорей: якоря печатаются в разметку как
+  // «pack»/«subject» и в осмысленный текст строки не входят.
+  function blockText(block) {
     if (!block) return '';
     const copy = block.cloneNode(true);
     copy.querySelectorAll('a.m-anchor, .m-anchor').forEach((a) => a.remove());
     return clean(copy.textContent);
   }
 
-  // Тип якоря определяем по тексту: у «subjectinactive» атрибут id тоже
-  // равен "subject", отличается только подпись.
-  function anchorKind(anchor) {
-    const text = clean(anchor.textContent).toLowerCase();
-    const id = (anchor.getAttribute('id') || '').toLowerCase();
-    if (text === 'pack' || (id === 'pack' && text !== 'subject')) return 'pack';
-    if (text === 'subject') return 'subject';
-    if (text === 'subjectinactive') return 'inactive';
-    if (id === 'subject') return 'subject';
-    return 'other';
+  // Блоки, из которых состоит текст страницы. Заголовки первого и второго
+  // уровня задают структуру, остальное — обычные строки.
+  const BLOCK_SELECTOR =
+    'h1, h2, h3, h4, h5, h6, p, li, td, th, pre, blockquote, div';
+
+  // Строкой считаем только «лист» — блок, внутри которого нет других блоков.
+  // Иначе обёртки разметки дали бы тот же текст ещё раз.
+  const isLeafBlock = (el) => !el.querySelector(BLOCK_SELECTOR);
+
+  // Корень содержимого статьи: ограничивает разбор, чтобы в структуру не
+  // попали заголовки интерфейса вокруг статьи.
+  function articleRoot() {
+    const candidates = [
+      '.m-article__content',
+      '.m-article-content',
+      '.m-article',
+      'article',
+      '[class*="article-content"]',
+    ];
+    for (const selector of candidates) {
+      const node = document.querySelector(selector);
+      if (node && node.querySelector('h1, h2')) return node;
+    }
+    return document.body;
   }
 
   // Блок верхнего уровня внутри полотна, в котором лежит узел
@@ -81,17 +93,21 @@ async function kmsStep(step, payload) {
 
   // Последний блок раздела: идём от заголовка вниз, пока не встретим
   // новый заголовок первого или второго уровня либо конец документа.
-  function sectionEnd(canvas, heading) {
+  // При skipEmpty возвращаем последнюю непустую строку раздела — пустые
+  // абзацы в хвосте не должны отодвигать точку вставки.
+  function sectionEnd(canvas, heading, skipEmpty = false) {
     const start = topLevelOf(canvas, heading);
     let last = start;
+    let lastFilled = null;
     let node = start ? start.nextElementSibling : null;
 
     while (node) {
       if (/^H[12]$/.test(node.tagName)) break;
       last = node;
+      if (clean(node.textContent)) lastFilled = node;
       node = node.nextElementSibling;
     }
-    return last;
+    return skipEmpty ? lastFilled || start : last;
   }
 
   function caretAtEnd(canvas, element) {
@@ -199,24 +215,52 @@ async function kmsStep(step, payload) {
       }
 
       // ---------------------------------------------------------------- фаза 2
-      case 'scan-anchors': {
+      // Структуру головной страницы читаем по заголовкам: первый уровень —
+      // пакеты, второй — темы. Внутри темы запоминаем последнюю непустую
+      // строку: её показываем пользователю в фазе 3.
+      case 'scan-structure': {
         await sleep(500);
-        let anchors = [];
+        let root = articleRoot();
         const t0 = Date.now();
 
-        // Контент рисуется асинхронно: ждём появления якорей, но не падаем,
-        // если их действительно нет — это отдельная ошибка конфигурации.
+        // Содержимое рисуется асинхронно: ждём появления заголовков, но не
+        // падаем, если их нет — это отдельная ошибка конфигурации.
         while (Date.now() - t0 < 25000) {
-          anchors = [...document.querySelectorAll('a.m-anchor, .m-anchor')];
-          if (anchors.length > 0) break;
+          root = articleRoot();
+          if (root.querySelector('h1, h2')) break;
           await sleep(400);
         }
 
-        const items = anchors
-          .map((a) => ({ kind: anchorKind(a), text: anchorLineText(a) }))
-          .filter((i) => i.kind === 'pack' || i.kind === 'subject');
+        const packs = [];
+        let orphanSubjects = 0;
+        let pack = null;
+        let subject = null;
 
-        return { ok: true, result: { anchors: items, total: anchors.length } };
+        for (const el of root.querySelectorAll(BLOCK_SELECTOR)) {
+          if (el.tagName === 'H1') {
+            pack = { text: blockText(el), subjects: [] };
+            subject = null;
+            packs.push(pack);
+            continue;
+          }
+
+          if (el.tagName === 'H2') {
+            if (!pack) {
+              orphanSubjects += 1;
+              subject = null;
+              continue;
+            }
+            subject = { text: blockText(el), lastLine: '' };
+            pack.subjects.push(subject);
+            continue;
+          }
+
+          if (!subject || !isLeafBlock(el)) continue;
+          const text = blockText(el);
+          if (text) subject.lastLine = text;
+        }
+
+        return { ok: true, result: { packs, orphanSubjects } };
       }
 
       // ------------------------------------------------- редактор: готовность
@@ -239,9 +283,32 @@ async function kmsStep(step, payload) {
         const canvas = await waitFor(findCanvas, 15000);
         const headings = [...canvas.querySelectorAll('h2')].map((h, i) => ({
           index: i,
-          text: anchorLineText(h) || clean(h.textContent),
+          text: blockText(h) || clean(h.textContent),
         }));
         return { ok: true, result: { headings } };
+      }
+
+      // Разделы полотна с их пакетами: индекс считаем по заголовкам второго
+      // уровня, чтобы он совпадал с индексом в шагах вставки.
+      case 'outline': {
+        const canvas = await waitFor(findCanvas, 15000);
+        const sections = [];
+        let pack = '';
+        let index = -1;
+
+        for (const node of canvas.querySelectorAll('h1, h2')) {
+          if (node.tagName === 'H1') {
+            pack = blockText(node) || clean(node.textContent);
+            continue;
+          }
+          index += 1;
+          sections.push({
+            index,
+            pack,
+            text: blockText(node) || clean(node.textContent),
+          });
+        }
+        return { ok: true, result: { sections } };
       }
 
       // ------------------------------------------------- вставка в раздел
@@ -275,7 +342,8 @@ async function kmsStep(step, payload) {
         const heading = headings[payload.headingIndex];
         if (!heading) throw new Error('раздел не найден на полотне');
 
-        const end = sectionEnd(canvas, heading);
+        // Ссылку ставим сразу за последней непустой строкой раздела
+        const end = sectionEnd(canvas, heading, true);
         if (!end) throw new Error('не удалось определить конец раздела');
 
         caretAtEnd(canvas, end);

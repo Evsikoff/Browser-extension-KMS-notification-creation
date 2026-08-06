@@ -19,9 +19,11 @@ const MAIN_PAGE_WAIT_SECONDS = 30; // головная страница — бы
 
 const state = {
   config: null,
-  structure: [], // [{ name, subjects: [] }] — «Структура клиентских уведомлений»
+  // [{ name, subjects: [{ title, lastLine }] }] — структура головной страницы:
+  // заголовки первого уровня дают пакеты, второго — темы.
+  structure: [],
   checkRunId: 0,
-  meta: null, // { packageName, subject, code, event, title }
+  meta: null, // { packageName, subject, subjectLastLine, code, event, title }
   contentHtml: '',
   created: null, // { id, url, spaceId }
 };
@@ -42,6 +44,8 @@ const ui = {
 
   checkStatus: document.getElementById('checkStatus'),
   structureTree: document.getElementById('structureTree'),
+  configFold: document.getElementById('configFold'),
+  configNote: document.getElementById('configNote'),
   mainPageUrl: document.getElementById('mainPageUrl'),
   packages: document.getElementById('packages'),
   addPackage: document.getElementById('addPackage'),
@@ -51,6 +55,7 @@ const ui = {
 
   metaPackage: document.getElementById('metaPackage'),
   metaSubject: document.getElementById('metaSubject'),
+  metaSubjectLine: document.getElementById('metaSubjectLine'),
   metaCode: document.getElementById('metaCode'),
   metaEvent: document.getElementById('metaEvent'),
   backToPhase2: document.getElementById('backToPhase2'),
@@ -323,6 +328,15 @@ function renderConfig() {
   state.config.packages.forEach((pkg, i) => {
     ui.packages.appendChild(packageMarkup(pkg, i));
   });
+  ui.configNote.textContent = `— пакетов: ${state.config.packages.length}`;
+}
+
+// Настройки свёрнуты, пока всё сходится. Разворачиваем их сами, когда
+// проверка упёрлась в конфигурацию: иначе «поправьте в настройках ниже»
+// указывает на скрытый блок.
+function failCheck(text) {
+  setStatus(ui.checkStatus, text, 'err');
+  ui.configFold.open = true;
 }
 
 function readConfigFromForm() {
@@ -374,7 +388,9 @@ function renderStructure() {
     for (const subject of pack.subjects) {
       const subjectNode = document.createElement('div');
       subjectNode.className = 'tree__subject';
-      subjectNode.textContent = subject;
+      subjectNode.textContent = subject.lastLine
+        ? `${subject.title} — последняя строка: ${subject.lastLine}`
+        : `${subject.title} — раздел пуст`;
       ui.structureTree.appendChild(subjectNode);
     }
   }
@@ -390,11 +406,11 @@ async function runStructureCheck() {
   setStatus(ui.checkStatus, 'Читаю головную страницу клиентских нотификаций…');
 
   if (!state.config.mainPageUrl) {
-    setStatus(ui.checkStatus, 'Укажите адрес головной страницы.', 'err');
+    failCheck('Укажите адрес головной страницы.');
     return;
   }
   if (state.config.packages.length === 0) {
-    setStatus(ui.checkStatus, 'Добавьте хотя бы один пакет уведомлений.', 'err');
+    failCheck('Добавьте хотя бы один пакет уведомлений.');
     return;
   }
 
@@ -404,86 +420,60 @@ async function runStructureCheck() {
     await waitTabComplete(tab.id);
     if (aborted()) return;
 
-    const { anchors } = await exec(tab.id, 'scan-anchors');
+    const { packs, orphanSubjects } = await exec(tab.id, 'scan-structure');
     if (aborted()) return;
 
-    const packAnchors = anchors.filter((a) => a.kind === 'pack');
-    const subjectAnchors = anchors.filter((a) => a.kind === 'subject');
-
-    if (packAnchors.length === 0) {
-      setStatus(
-        ui.checkStatus,
-        'На головной странице нет якорей «pack». Проверьте адрес головной ' +
-          'страницы в настройках ниже.',
-        'err'
+    if (packs.length === 0) {
+      failCheck(
+        'На головной странице нет заголовков первого уровня — пакеты ' +
+          'определить не из чего. Проверьте адрес головной страницы в ' +
+          'настройках ниже.'
       );
       return;
     }
 
-    // Сверяем тексты строк с якорями «pack» с наименованиями пакетов
+    // Сверяем заголовки первого уровня с наименованиями пакетов
     const missing = [];
-    const matched = new Map(); // имя пакета из конфигурации → индекс якоря
+    const matched = new Map(); // имя пакета из конфигурации → индекс заголовка
 
     state.config.packages.forEach((pkg) => {
-      const index = packAnchors.findIndex(
-        (a) => normalizeText(a.text) === normalizeText(pkg.name)
+      const index = packs.findIndex(
+        (p) => normalizeText(p.text) === normalizeText(pkg.name)
       );
       if (index === -1) missing.push(pkg.name);
       else matched.set(pkg.name, index);
     });
 
     if (missing.length > 0) {
-      setStatus(
-        ui.checkStatus,
+      failCheck(
         'На головной странице не найдены пакеты: ' +
           missing.join('; ') +
           '. Найдено на странице: ' +
-          packAnchors.map((a) => a.text).join('; ') +
-          '. Поправьте наименования в настройках ниже.',
-        'err'
+          packs.map((p) => p.text).join('; ') +
+          '. Поправьте наименования в настройках ниже.'
       );
       return;
     }
 
-    if (subjectAnchors.length === 0) {
-      setStatus(
-        ui.checkStatus,
-        'На головной странице нет якорей «subject» — темы уведомлений ' +
-          'определить не из чего.',
-        'err'
+    if (packs.every((p) => p.subjects.length === 0)) {
+      failCheck(
+        'На головной странице нет заголовков второго уровня — темы ' +
+          'уведомлений определить не из чего.'
       );
       return;
-    }
-
-    // Каждая тема относится к ближайшему якорю «pack» выше по документу
-    const byPackIndex = new Map();
-    let currentPack = -1;
-    let orphanSubjects = 0;
-    let packCounter = -1;
-
-    for (const anchor of anchors) {
-      if (anchor.kind === 'pack') {
-        packCounter += 1;
-        currentPack = packCounter;
-        if (!byPackIndex.has(currentPack)) byPackIndex.set(currentPack, []);
-      } else if (anchor.kind === 'subject') {
-        if (currentPack === -1) {
-          orphanSubjects += 1;
-          continue;
-        }
-        const list = byPackIndex.get(currentPack);
-        if (!list.includes(anchor.text)) list.push(anchor.text);
-      }
     }
 
     state.structure = state.config.packages.map((pkg) => ({
       name: pkg.name,
-      subjects: byPackIndex.get(matched.get(pkg.name)) || [],
+      subjects: (packs[matched.get(pkg.name)].subjects || []).map((s) => ({
+        title: s.text,
+        lastLine: s.lastLine,
+      })),
     }));
 
     const notes = [];
-    const extra = packAnchors
-      .map((a) => a.text)
+    const extra = packs
+      .map((p) => p.text)
       .filter(
         (text) =>
           !state.config.packages.some(
@@ -500,6 +490,12 @@ async function runStructureCheck() {
     if (empty.length > 0) {
       notes.push(`без тем: ${empty.map((p) => p.name).join('; ')}`);
     }
+    const blank = state.structure
+      .flatMap((p) => p.subjects)
+      .filter((s) => !s.lastLine);
+    if (blank.length > 0) {
+      notes.push(`тем без строк: ${blank.map((s) => s.title).join('; ')}`);
+    }
 
     setStatus(
       ui.checkStatus,
@@ -513,7 +509,7 @@ async function runStructureCheck() {
     ui.toPhase3.disabled = false;
   } catch (e) {
     if (!aborted()) {
-      setStatus(ui.checkStatus, `Проверка не выполнена: ${e.message}`, 'err');
+      failCheck(`Проверка не выполнена: ${e.message}`);
     }
   } finally {
     if (tab) await closeTabQuietly(tab.id);
@@ -542,16 +538,42 @@ function fillSubjectSelect() {
 
   if (!pack) {
     ui.metaSubject.disabled = true;
+    showSubjectLastLine();
     return;
   }
 
   for (const subject of pack.subjects) {
     const option = document.createElement('option');
-    option.value = subject;
-    option.textContent = subject;
+    option.value = subject.title;
+    option.textContent = subject.title;
     ui.metaSubject.appendChild(option);
   }
   ui.metaSubject.disabled = pack.subjects.length === 0;
+  showSubjectLastLine();
+}
+
+// Тема, выбранная в фазе 3, вместе с прочитанной на головной странице
+// последней непустой строкой её раздела.
+function currentSubject() {
+  const pack = state.structure.find((p) => p.name === ui.metaPackage.value);
+  if (!pack) return null;
+  return pack.subjects.find((s) => s.title === ui.metaSubject.value) || null;
+}
+
+// Последняя строка темы — ориентир: за ней встанет ссылка в фазе 7.
+function showSubjectLastLine() {
+  const subject = currentSubject();
+
+  if (!subject) {
+    ui.metaSubjectLine.textContent = '';
+    ui.metaSubjectLine.hidden = true;
+    return;
+  }
+
+  ui.metaSubjectLine.textContent = subject.lastLine
+    ? `Последняя строка темы на головной странице: «${subject.lastLine}».`
+    : 'В этой теме на головной странице нет непустых строк.';
+  ui.metaSubjectLine.hidden = false;
 }
 
 function validateMeta() {
@@ -567,6 +589,7 @@ function goToMeta() {
   fillPackageSelect();
   ui.metaCode.value = '';
   ui.metaEvent.value = '';
+  showSubjectLastLine();
   validateMeta();
   showPhase('phase-3', 3);
 }
@@ -580,9 +603,12 @@ function currentPackage() {
 }
 
 function goToContent() {
+  const subject = currentSubject();
+
   state.meta = {
     packageName: ui.metaPackage.value,
     subject: ui.metaSubject.value,
+    subjectLastLine: subject ? subject.lastLine : '',
     code: ui.metaCode.value.trim(),
     event: ui.metaEvent.value.trim(),
   };
@@ -592,12 +618,7 @@ function goToContent() {
     `Название страницы: «${state.meta.title}». ` +
     `Пакет: ${state.meta.packageName}. Тема: ${state.meta.subject}.`;
 
-  editor.setHtml(
-    buildNotificationTemplate({
-      eventText: state.meta.event,
-      parentViewUrl: currentPackage().viewUrl,
-    })
-  );
+  editor.setHtml(buildNotificationTemplate({ eventText: state.meta.event }));
 
   showPhase('phase-4', 4);
 }
@@ -655,19 +676,12 @@ async function waitForEditorTab(tabId, what, seconds) {
       [
         { label: 'Подождать ещё', value: 'wait', primary: true },
         { label: 'Перезагрузить страницу', value: 'reload' },
-        { label: 'Открыть вкладку и посмотреть', value: 'show' },
       ]
     );
 
     if (answer === 'reload') {
       log('Перезагружаю страницу.');
       await chrome.tabs.reload(tabId);
-    } else if (answer === 'show') {
-      await chrome.tabs.update(tabId, { active: true });
-      await ask(
-        'Посмотрите вкладку и вернитесь сюда, когда будете готовы продолжить.',
-        [{ label: 'Продолжить ожидание', value: 'wait', primary: true }]
-      );
     }
   }
 }
@@ -676,25 +690,19 @@ function capitalize(text) {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-// Вставка идёт в фоновой вкладке. Если редактор её не принял (такое бывает,
-// когда браузер требует активную вкладку), повторяем с переключением и
-// сразу возвращаем пользователя на вкладку мастера.
+// Вставка идёт только в фоновой вкладке: фокус пользователя мастер никуда
+// не уводит. Если редактор не принял вставку с первого раза — повторяем на
+// той же вкладке, дав странице дорисоваться.
 async function insertInBackground(tabId, step, payload) {
   try {
     await exec(tabId, step, payload);
     return;
   } catch (e) {
-    log(`В фоновой вкладке вставка не прошла (${e.message}). Повторяю с ` +
-      'переключением на вкладку.');
+    log(`Вставка не прошла (${e.message}). Повторяю на той же вкладке.`);
   }
 
-  const panel = await chrome.tabs.getCurrent();
-  await chrome.tabs.update(tabId, { active: true });
-  try {
-    await exec(tabId, step, payload);
-  } finally {
-    if (panel) await chrome.tabs.update(panel.id, { active: true });
-  }
+  await sleep(1500);
+  await exec(tabId, step, payload);
 }
 
 // Выбор раздела: подставляем самый похожий на тему заголовок, пользователь
@@ -727,6 +735,55 @@ async function chooseSection(tabId, what) {
   );
 }
 
+// Раздел головной страницы: пакеты — заголовки первого уровня, темы —
+// второго, поэтому тему ищем внутри выбранного пакета.
+async function chooseMainPageSection(tabId) {
+  const { sections } = await exec(tabId, 'outline');
+  if (sections.length === 0) {
+    throw new Error('на головной странице нет заголовков второго уровня');
+  }
+
+  const inPack = sections.filter(
+    (s) => normalizeText(s.pack) === normalizeText(state.meta.packageName)
+  );
+  if (inPack.length === 0) {
+    log(
+      `Пакет «${state.meta.packageName}» не найден среди заголовков первого ` +
+        'уровня — ищу тему по всей странице.'
+    );
+  }
+
+  const pool = inPack.length > 0 ? inPack : sections;
+  let best = pool[0];
+  let bestScore = -1;
+  for (const section of pool) {
+    const score = similarity(section.text, state.meta.subject);
+    if (score > bestScore) {
+      bestScore = score;
+      best = section;
+    }
+  }
+
+  log(
+    `Наиболее близкая тема: «${best.text}» ` +
+      `(совпадение ${Math.round(bestScore * 100)}%).`
+  );
+
+  const lastLine = state.meta.subjectLastLine
+    ? ` Ссылка встанет за последней строкой темы: «${state.meta.subjectLastLine}».`
+    : '';
+
+  return pickSection(
+    `Тема уведомления: «${state.meta.subject}». Вставляем в конец темы:` +
+      lastLine,
+    sections.map((s) => ({
+      index: s.index,
+      text: s.pack ? `${s.pack} → ${s.text}` : s.text,
+    })),
+    best.index
+  );
+}
+
 // ------------------------------------------------------------------ фаза 5
 
 async function phaseCreatePage() {
@@ -742,11 +799,12 @@ async function phaseCreatePage() {
   const html = state.contentHtml;
   const text = editor.getText();
 
-  const tab = await chrome.tabs.create({ url: pkg.createChildUrl, active: true });
-  log('Открыта форма создания дочерней страницы.');
+  const tab = await chrome.tabs.create({ url: pkg.createChildUrl, active: false });
+  log('Открыта форма создания дочерней страницы (в фоновой вкладке).');
 
   await waitTabComplete(tab.id);
-  await sleep(1500); // даём SPA дорисоваться после status=complete
+  await exec(tab.id, 'canvas'); // ждём полотно, а не фиксированную паузу
+  await sleep(1500); // даём SPA дорисоваться после появления полотна
 
   try {
     await exec(tab.id, 'fullwidth');
@@ -757,7 +815,7 @@ async function phaseCreatePage() {
   await exec(tab.id, 'title', state.meta.title);
   log(`Название задано: «${state.meta.title}».`);
 
-  await exec(tab.id, 'content', { html, text });
+  await insertInBackground(tab.id, 'content', { html, text });
   log('Содержание вставлено на полотно.');
 
   const urlBeforeFinish = (await chrome.tabs.get(tab.id)).url || '';
@@ -849,9 +907,9 @@ async function phaseAddLink() {
   log('Открываю головную страницу на редактирование.');
 
   await waitForEditorTab(tab.id, 'головная страница', MAIN_PAGE_WAIT_SECONDS);
-  setStatus(ui.workStatus, 'Выберите раздел, в конец которого добавить ссылку.');
+  setStatus(ui.workStatus, 'Выберите тему, в конец которой добавить ссылку.');
 
-  const headingIndex = await chooseSection(tab.id, 'головной странице');
+  const headingIndex = await chooseMainPageSection(tab.id);
 
   setStatus(ui.workStatus, 'Добавляю ссылку и публикую головную страницу.');
   await insertInBackground(tab.id, 'insert-link', {
@@ -957,6 +1015,7 @@ ui.metaPackage.addEventListener('change', () => {
   fillSubjectSelect(); // смена пакета очищает тему
   validateMeta();
 });
+ui.metaSubject.addEventListener('change', showSubjectLastLine);
 ['change', 'input'].forEach((event) => {
   ui.metaSubject.addEventListener(event, validateMeta);
   ui.metaCode.addEventListener(event, validateMeta);
@@ -968,12 +1027,7 @@ ui.toPhase4.addEventListener('click', goToContent);
 
 ui.backToPhase3.addEventListener('click', () => showPhase('phase-3', 3));
 ui.resetTemplate.addEventListener('click', () => {
-  editor.setHtml(
-    buildNotificationTemplate({
-      eventText: state.meta.event,
-      parentViewUrl: currentPackage().viewUrl,
-    })
-  );
+  editor.setHtml(buildNotificationTemplate({ eventText: state.meta.event }));
 });
 ui.toPhase5.addEventListener('click', runPipeline);
 
