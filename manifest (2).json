@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "KMS: Мастер клиентских уведомлений",
+  "description": "Создаёт страницу клиентского уведомления в Naumen KMS, добавляет её макет на страницу пакета и ссылку на головную страницу",
+  "version": "1.0.0",
+  "permissions": ["tabs", "scripting", "storage"],
+  "host_permissions": ["*://kms.headoffice.psbank.local/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Открыть мастер клиентских уведомлений"
+  }
+}

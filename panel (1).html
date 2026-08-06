@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>KMS: Мастер клиентских уведомлений</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+
+<header class="head">
+  <h1>Мастер клиентских уведомлений</h1>
+  <ol class="steps" id="steps">
+    <li data-step="1">Авторизация</li>
+    <li data-step="2">Конфигурация</li>
+    <li data-step="3">Метаданные</li>
+    <li data-step="4">Содержание</li>
+    <li data-step="5">Создание страницы</li>
+    <li data-step="6">Макет в пакете</li>
+    <li data-step="7">Ссылка на головной</li>
+  </ol>
+</header>
+
+<main>
+
+  <!-- ================================================== Фаза 1 -->
+  <section class="phase" id="phase-1">
+    <h2>Проверка авторизации</h2>
+    <p class="status" id="authStatus">Проверка авторизации…</p>
+    <div class="row" id="authActions" hidden>
+      <button class="btn btn-primary" id="authRetry">Проверить ещё раз</button>
+    </div>
+  </section>
+
+  <!-- ================================================== Фаза 2 -->
+  <section class="phase" id="phase-2">
+    <h2>Конфигурация и проверка структуры</h2>
+
+    <div class="check" id="checkBox">
+      <p class="status" id="checkStatus">Проверка запускается…</p>
+      <div class="tree" id="structureTree" hidden></div>
+    </div>
+
+    <label class="field">
+      <span class="field__label">Головная страница клиентских нотификаций</span>
+      <input type="text" id="mainPageUrl" data-config>
+    </label>
+
+    <h3>Пакеты уведомлений</h3>
+    <div id="packages"></div>
+
+    <div class="row">
+      <button class="btn" id="addPackage">Добавить пакет</button>
+      <button class="btn" id="resetConfig">Вернуть значения по умолчанию</button>
+      <button class="btn" id="recheck">Перезапустить проверку</button>
+      <button class="btn btn-primary" id="toPhase3" disabled>Далее</button>
+    </div>
+  </section>
+
+  <!-- ================================================== Фаза 3 -->
+  <section class="phase" id="phase-3">
+    <h2>Метаданные уведомления</h2>
+
+    <label class="field">
+      <span class="field__label">Пакет уведомления</span>
+      <select id="metaPackage"></select>
+    </label>
+
+    <label class="field">
+      <span class="field__label">Тема уведомления</span>
+      <select id="metaSubject" disabled></select>
+    </label>
+
+    <label class="field">
+      <span class="field__label">Код уведомления</span>
+      <input type="text" id="metaCode" placeholder="К-1.15.1">
+    </label>
+
+    <label class="field">
+      <span class="field__label">Событие уведомления</span>
+      <input type="text" id="metaEvent" placeholder="Изменение порядка акцептов по подконтрольной организации (РПП)">
+    </label>
+
+    <div class="row">
+      <button class="btn" id="backToPhase2">Назад к настройкам</button>
+      <button class="btn btn-primary" id="toPhase4" disabled>Далее</button>
+    </div>
+  </section>
+
+  <!-- ================================================== Фаза 4 -->
+  <section class="phase" id="phase-4">
+    <h2>Данные уведомления</h2>
+    <p class="hint" id="editorTitleHint"></p>
+
+    <div class="editor" id="editor">
+      <div class="editor__toolbar">
+        <button class="tool" data-command="bold" title="Жирный"><b>Ж</b></button>
+        <button class="tool" data-command="italic" title="Курсив"><i>К</i></button>
+        <label class="tool tool--color" title="Цвет текста">
+          Цвет
+          <input type="color" value="#c62828" data-editor-color>
+        </label>
+        <button class="tool" data-command="insertUnorderedList" title="Маркированный список">• Список</button>
+        <button class="tool" data-command="insertOrderedList" title="Нумерованный список">1. Список</button>
+        <button class="tool" data-command="createLink" title="Вставить ссылку">Ссылка</button>
+        <button class="tool" data-command="unlink" title="Убрать ссылку">Убрать ссылку</button>
+        <button class="tool" data-command="removeFormat" title="Очистить форматирование">Очистить</button>
+        <button class="tool tool--right" data-command="source" title="Показать HTML-код">HTML</button>
+      </div>
+      <div class="editor__canvas" contenteditable="true" data-editor-canvas></div>
+      <textarea class="editor__source" data-editor-source hidden></textarea>
+    </div>
+
+    <div class="row">
+      <button class="btn" id="backToPhase3">Назад</button>
+      <button class="btn" id="resetTemplate">Вернуть шаблон</button>
+      <button class="btn btn-primary" id="toPhase5">Далее</button>
+    </div>
+  </section>
+
+  <!-- ============================================ Фазы 5, 6, 7 -->
+  <section class="phase" id="phase-work">
+    <h2 id="workTitle">Создание страницы уведомления</h2>
+    <p class="status" id="workStatus"></p>
+
+    <div class="timer" id="workTimer" hidden>
+      <span class="timer__value" id="workTimerValue">3:00</span>
+      <span class="timer__label">предельное время ожидания — обычно мастер продолжает раньше</span>
+    </div>
+
+    <div class="prompt" id="workPrompt" hidden>
+      <p class="prompt__text" id="workPromptText"></p>
+      <div class="row" id="workPromptButtons"></div>
+    </div>
+
+    <div class="picker" id="workPicker" hidden>
+      <p class="prompt__text" id="workPickerText"></p>
+      <select id="workPickerSelect"></select>
+      <div class="row">
+        <button class="btn btn-primary" id="workPickerConfirm">Вставить в этот раздел</button>
+      </div>
+    </div>
+
+    <pre class="log" id="log"></pre>
+  </section>
+
+  <!-- ================================================== Финал -->
+  <section class="phase" id="phase-done">
+    <h2>Уведомление добавлено</h2>
+    <p class="status">Страница создана, макет добавлен в пакет, ссылка — на головной странице.</p>
+
+    <label class="field">
+      <span class="field__label">Адрес созданной страницы</span>
+      <input type="text" id="doneUrl" readonly>
+    </label>
+
+    <div class="row">
+      <button class="btn" id="copyUrl">Скопировать адрес</button>
+      <button class="btn btn-primary" id="another">Добавить ещё одно уведомление</button>
+    </div>
+
+    <pre class="log" id="doneLog"></pre>
+  </section>
+
+</main>
+
+<script src="config.js"></script>
+<script src="kms.js"></script>
+<script src="editor.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

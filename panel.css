@@ -1,0 +1,316 @@
+:root {
+  --ink: #1b1f24;
+  --muted: #5c6672;
+  --line: #d8dee6;
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --accent: #0b3d91;
+  --accent-soft: #e8eefb;
+  --ok: #1a7f37;
+  --warn: #a86400;
+  --err: #c62828;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 0 48px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.5 'Liberation Sans', Arial, sans-serif;
+}
+
+main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px 20px 0;
+}
+
+/* ---------------------------------------------------------------- шапка */
+
+.head {
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+  padding: 20px 20px 0;
+}
+
+.head h1 {
+  max-width: 960px;
+  margin: 0 auto;
+  font-size: 20px;
+  letter-spacing: .2px;
+}
+
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 960px;
+  margin: 14px auto 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.steps li {
+  counter-increment: step;
+  padding: 8px 12px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  border-bottom: 3px solid transparent;
+}
+
+.steps li::before {
+  content: counter(step);
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--line);
+  color: var(--card);
+  font-size: 11px;
+  font-weight: bold;
+  vertical-align: -3px;
+}
+
+.steps li.is-done::before { background: var(--ok); }
+
+.steps li.is-active {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+
+.steps li.is-active::before { background: var(--accent); }
+
+/* ---------------------------------------------------------------- фазы */
+
+.phase {
+  display: none;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 20px 22px 24px;
+}
+
+.phase.is-visible { display: block; }
+
+.phase h2 { margin: 0 0 16px; font-size: 17px; }
+.phase h3 { margin: 22px 0 10px; font-size: 14px; }
+
+.status { margin: 0 0 14px; }
+.status.is-ok { color: var(--ok); }
+.status.is-warn { color: var(--warn); }
+.status.is-err { color: var(--err); }
+
+.hint { color: var(--muted); font-size: 12px; margin: -8px 0 14px; }
+
+/* ---------------------------------------------------------------- поля */
+
+.field { display: block; margin-bottom: 14px; }
+
+.field__label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: bold;
+  color: var(--muted);
+}
+
+input[type="text"], select, textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+}
+
+input[readonly] { background: var(--bg); }
+
+input:focus-visible, select:focus-visible, textarea:focus-visible,
+button:focus-visible, [contenteditable]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---------------------------------------------------------- пакеты */
+
+.package {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 14px 16px 4px;
+  margin-bottom: 12px;
+  background: #fcfcfd;
+}
+
+.package__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.package__head .field { flex: 1; margin-bottom: 0; }
+
+.package__grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+@media (min-width: 860px) {
+  .package__grid { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* ---------------------------------------------------------- кнопки */
+
+.row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+
+.btn {
+  padding: 9px 18px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+
+.btn:hover { border-color: var(--accent); }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:disabled {
+  background: #b7c2d6;
+  border-color: #b7c2d6;
+  cursor: default;
+}
+
+.btn-danger { border-color: var(--err); color: var(--err); }
+
+/* ---------------------------------------------------- проверка структуры */
+
+.check {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  padding: 14px 16px;
+  margin-bottom: 20px;
+  background: var(--accent-soft);
+}
+
+.check .status { margin: 0; }
+
+.tree { margin-top: 12px; font-size: 13px; }
+.tree__pack { font-weight: bold; margin-top: 8px; }
+.tree__subject { color: var(--muted); padding-left: 16px; }
+
+/* ---------------------------------------------------------- редактор */
+
+.editor {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.editor__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+
+.tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+
+.tool:hover { border-color: var(--line); }
+.tool.is-active { background: var(--accent); color: #fff; }
+.tool--right { margin-left: auto; }
+.tool--color input { width: 28px; height: 22px; padding: 0; border: none; background: none; }
+
+.editor__canvas {
+  min-height: 420px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 16px 18px;
+  background: #fff;
+}
+
+.editor__canvas p { margin: 0; }
+.editor__canvas a { color: var(--accent); }
+
+.editor__source {
+  width: 100%;
+  min-height: 420px;
+  border: none;
+  border-radius: 0;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------ работа и лог */
+
+.timer {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 4px 0 16px;
+}
+
+.timer__value {
+  font-size: 34px;
+  font-variant-numeric: tabular-nums;
+  font-weight: bold;
+  color: var(--accent);
+}
+
+.timer__label { color: var(--muted); font-size: 12px; }
+
+.prompt, .picker {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn);
+  border-radius: 4px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  background: #fffaf0;
+}
+
+.prompt__text { margin: 0 0 4px; }
+
+.log {
+  margin: 16px 0 0;
+  padding: 12px;
+  background: #101418;
+  color: #d7e2ee;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
