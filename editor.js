@@ -57,11 +57,8 @@ function templateSection(title, content) {
 }
 
 // Содержимое редактора фазы 4 (тело шаблона без html/head/title)
-function buildNotificationTemplate({ eventText, parentViewUrl }) {
-  let html =
-    `<div><b><u><i><a href="${escapeHtml(parentViewUrl)}" ` +
-    'style="text-decoration:none;">Ссылка на родительскую страницу</a>' +
-    '</i></u></b></div><br>';
+function buildNotificationTemplate({ eventText }) {
+  let html = '';
 
   for (const title of TEMPLATE_SECTIONS) {
     html += templateSection(title, title === 'Событие' ? eventText : '');
