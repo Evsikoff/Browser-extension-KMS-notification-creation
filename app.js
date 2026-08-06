@@ -44,6 +44,8 @@ const ui = {
 
   checkStatus: document.getElementById('checkStatus'),
   structureTree: document.getElementById('structureTree'),
+  configFold: document.getElementById('configFold'),
+  configNote: document.getElementById('configNote'),
   mainPageUrl: document.getElementById('mainPageUrl'),
   packages: document.getElementById('packages'),
   addPackage: document.getElementById('addPackage'),
@@ -326,6 +328,15 @@ function renderConfig() {
   state.config.packages.forEach((pkg, i) => {
     ui.packages.appendChild(packageMarkup(pkg, i));
   });
+  ui.configNote.textContent = `— пакетов: ${state.config.packages.length}`;
+}
+
+// Настройки свёрнуты, пока всё сходится. Разворачиваем их сами, когда
+// проверка упёрлась в конфигурацию: иначе «поправьте в настройках ниже»
+// указывает на скрытый блок.
+function failCheck(text) {
+  setStatus(ui.checkStatus, text, 'err');
+  ui.configFold.open = true;
 }
 
 function readConfigFromForm() {
@@ -395,11 +406,11 @@ async function runStructureCheck() {
   setStatus(ui.checkStatus, 'Читаю головную страницу клиентских нотификаций…');
 
   if (!state.config.mainPageUrl) {
-    setStatus(ui.checkStatus, 'Укажите адрес головной страницы.', 'err');
+    failCheck('Укажите адрес головной страницы.');
     return;
   }
   if (state.config.packages.length === 0) {
-    setStatus(ui.checkStatus, 'Добавьте хотя бы один пакет уведомлений.', 'err');
+    failCheck('Добавьте хотя бы один пакет уведомлений.');
     return;
   }
 
@@ -413,12 +424,10 @@ async function runStructureCheck() {
     if (aborted()) return;
 
     if (packs.length === 0) {
-      setStatus(
-        ui.checkStatus,
+      failCheck(
         'На головной странице нет заголовков первого уровня — пакеты ' +
           'определить не из чего. Проверьте адрес головной страницы в ' +
-          'настройках ниже.',
-        'err'
+          'настройках ниже.'
       );
       return;
     }
@@ -436,24 +445,20 @@ async function runStructureCheck() {
     });
 
     if (missing.length > 0) {
-      setStatus(
-        ui.checkStatus,
+      failCheck(
         'На головной странице не найдены пакеты: ' +
           missing.join('; ') +
           '. Найдено на странице: ' +
           packs.map((p) => p.text).join('; ') +
-          '. Поправьте наименования в настройках ниже.',
-        'err'
+          '. Поправьте наименования в настройках ниже.'
       );
       return;
     }
 
     if (packs.every((p) => p.subjects.length === 0)) {
-      setStatus(
-        ui.checkStatus,
+      failCheck(
         'На головной странице нет заголовков второго уровня — темы ' +
-          'уведомлений определить не из чего.',
-        'err'
+          'уведомлений определить не из чего.'
       );
       return;
     }
@@ -504,7 +509,7 @@ async function runStructureCheck() {
     ui.toPhase3.disabled = false;
   } catch (e) {
     if (!aborted()) {
-      setStatus(ui.checkStatus, `Проверка не выполнена: ${e.message}`, 'err');
+      failCheck(`Проверка не выполнена: ${e.message}`);
     }
   } finally {
     if (tab) await closeTabQuietly(tab.id);

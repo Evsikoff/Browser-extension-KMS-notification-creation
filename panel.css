@@ -213,6 +213,53 @@ button:focus-visible, [contenteditable]:focus-visible {
 .tree__pack { font-weight: bold; margin-top: 8px; }
 .tree__subject { color: var(--muted); padding-left: 16px; }
 
+/* ------------------------------------------------- сворачиваемый блок */
+
+.fold {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fcfcfd;
+}
+
+/* Собственный шеврон вместо стандартного треугольника браузера */
+.fold__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  font-size: 13px;
+  font-weight: bold;
+  color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+}
+
+.fold__head::-webkit-details-marker { display: none; }
+.fold__head:hover { color: var(--ink); }
+
+.fold__head::before {
+  content: '';
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin: -2px 0 0 2px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg); /* закрыто — шеврон смотрит вправо */
+  transition: transform .15s;
+}
+
+.fold[open] > .fold__head::before {
+  transform: rotate(45deg); /* открыто — вниз */
+}
+
+.fold[open] > .fold__head { border-bottom: 1px solid var(--line); }
+
+.fold__note { font-weight: normal; }
+
+.fold__body { padding: 16px 16px 18px; }
+.fold__body h3:first-of-type { margin-top: 18px; }
+
 /* ---------------------------------------------------------- редактор */
 
 .editor {

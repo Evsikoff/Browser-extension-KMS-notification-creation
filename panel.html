@@ -40,18 +40,30 @@
       <div class="tree" id="structureTree" hidden></div>
     </div>
 
-    <label class="field">
-      <span class="field__label">Головная страница клиентских нотификаций</span>
-      <input type="text" id="mainPageUrl" data-config>
-    </label>
+    <details class="fold" id="configFold">
+      <summary class="fold__head">
+        Настройки
+        <span class="fold__note" id="configNote"></span>
+      </summary>
 
-    <h3>Пакеты уведомлений</h3>
-    <div id="packages"></div>
+      <div class="fold__body">
+        <label class="field">
+          <span class="field__label">Головная страница клиентских нотификаций</span>
+          <input type="text" id="mainPageUrl" data-config>
+        </label>
+
+        <h3>Пакеты уведомлений</h3>
+        <div id="packages"></div>
+
+        <div class="row">
+          <button class="btn" id="addPackage">Добавить пакет</button>
+          <button class="btn" id="resetConfig">Вернуть значения по умолчанию</button>
+          <button class="btn" id="recheck">Перезапустить проверку</button>
+        </div>
+      </div>
+    </details>
 
     <div class="row">
-      <button class="btn" id="addPackage">Добавить пакет</button>
-      <button class="btn" id="resetConfig">Вернуть значения по умолчанию</button>
-      <button class="btn" id="recheck">Перезапустить проверку</button>
       <button class="btn btn-primary" id="toPhase3" disabled>Далее</button>
     </div>
   </section>
