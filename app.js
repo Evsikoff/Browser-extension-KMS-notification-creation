@@ -854,14 +854,16 @@ function capitalize(text) {
 // той же вкладке, дав странице дорисоваться.
 async function insertInBackground(tabId, step, payload) {
   try {
-    await exec(tabId, step, payload);
-    return;
+    return await exec(tabId, step, payload);
   } catch (e) {
+    // Если испорченную вставку не удалось отменить, повтор добавит вторую
+    // такую же — решение отдаём пользователю сразу.
+    if (/отменить вставку не удалось/i.test(e.message)) throw e;
     log(`Вставка не прошла (${e.message}). Повторяю на той же вкладке.`);
   }
 
   await sleep(1500);
-  await exec(tabId, step, payload);
+  return exec(tabId, step, payload);
 }
 
 // Выбор раздела: подставляем самый похожий на тему заголовок, пользователь
@@ -1033,7 +1035,7 @@ async function phaseAddLayout() {
   const headingIndex = await chooseSection(tab.id, 'странице пакета');
 
   setStatus(ui.workStatus, 'Добавляю макет и публикую страницу пакета.');
-  await insertInBackground(tab.id, 'insert-html', {
+  const added = await insertInBackground(tab.id, 'insert-html', {
     headingIndex,
     html: layoutHtml({
       leftText: state.meta.title,
@@ -1041,7 +1043,7 @@ async function phaseAddLayout() {
       spaceId: state.created.spaceId,
     }),
   });
-  log('Макет добавлен в конец раздела.');
+  log(`Макет добавлен в конец раздела: ${added.where}.`);
 
   await publishExistingPage(tab.id, noteNotificationAdded(state.meta.title));
   log('Страница пакета опубликована.');
@@ -1071,11 +1073,11 @@ async function phaseAddLink() {
   const headingIndex = await chooseMainPageSection(tab.id);
 
   setStatus(ui.workStatus, 'Добавляю ссылку и публикую головную страницу.');
-  await insertInBackground(tab.id, 'insert-link', {
+  const added = await insertInBackground(tab.id, 'insert-link', {
     headingIndex,
     url: state.created.url,
   });
-  log('Ссылка добавлена в конец раздела.');
+  log(`Ссылка добавлена в конец раздела: ${added.where}.`);
 
   await publishExistingPage(tab.id, noteNotificationAdded(state.meta.title));
   log('Головная страница опубликована.');

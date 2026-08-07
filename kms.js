@@ -220,6 +220,37 @@ async function kmsStep(step, payload) {
     return skipEmpty ? lastFilled || start : last;
   }
 
+  // Блоки, внутрь которых нельзя ставить курсор: макеты, встроенные
+  // страницы, таблицы. Позиция «в конце макета» для редактора не является
+  // текстовой, и он переносит курсор туда, куда ему удобно, — обычно
+  // в начало следующего заголовка. Вставка после этого рушит и последний
+  // макет раздела, и сам заголовок.
+  const STRUCTURAL = '.m-grid, .m-embedded, table, [contenteditable="false"]';
+
+  const isStructural = (el) =>
+    Boolean(el && (el.matches(STRUCTURAL) || el.querySelector(STRUCTURAL)));
+
+  const TEXT_BLOCK_TAGS = /^(P|H[1-6]|LI|BLOCKQUOTE|PRE|DIV)$/;
+
+  const isTextBlock = (el) =>
+    Boolean(el) && TEXT_BLOCK_TAGS.test(el.tagName) && !isStructural(el);
+
+  // Последняя обычная строка раздела: запасная точка вставки, если завести
+  // пустую строку в самом конце раздела не удалось. Сам заголовок тоже
+  // годится — в пустом разделе других строк просто нет.
+  function lastTextBlockOf(canvas, heading) {
+    const start = topLevelOf(canvas, heading);
+    let found = isTextBlock(start) ? start : null;
+    let node = start ? start.nextElementSibling : null;
+
+    while (node) {
+      if (/^H[12]$/.test(node.tagName)) break;
+      if (isTextBlock(node)) found = node;
+      node = node.nextElementSibling;
+    }
+    return found;
+  }
+
   function caretAtEnd(canvas, element) {
     canvas.focus();
     const selection = window.getSelection();
@@ -268,6 +299,172 @@ async function kmsStep(step, payload) {
     if (!inserted && canvas.innerHTML === before) {
       throw new Error('редактор не принял вставку');
     }
+  }
+
+  // Готовим точку вставки в конце раздела: курсор должен оказаться в обычной
+  // пустой строке верхнего уровня. Возвращаем описание места — панель пишет
+  // его в журнал.
+  async function insertionPoint(canvas, headingIndex, skipEmpty = false) {
+    // Редактор перерисовывает разметку и заменяет узлы своими, поэтому
+    // раздел каждый раз ищем заново, а не держим ссылки.
+    const findHeading = () => [...canvas.querySelectorAll('h2')][headingIndex];
+
+    const heading = findHeading();
+    if (!heading) throw new Error('раздел не найден на полотне');
+
+    const end = sectionEnd(canvas, heading, skipEmpty);
+    if (!end) throw new Error('не удалось определить конец раздела');
+
+    // Пустая строка в конце раздела уже есть — просто встаём в неё
+    if (isTextBlock(end) && !clean(end.textContent)) {
+      caretAtEnd(canvas, end);
+      await sleep(150);
+      return 'пустая строка в конце раздела';
+    }
+
+    // Раздел заканчивается обычной строкой — уходим на новую
+    if (isTextBlock(end)) {
+      caretAtEnd(canvas, end);
+      await sleep(150);
+      await pressEnter(canvas);
+      await sleep(150);
+      return 'новая строка после последней строки раздела';
+    }
+
+    // Раздел заканчивается макетом или таблицей: заводим пустую строку сами
+    // и проверяем не ссылку на свой узел (редактор мог заменить его своим),
+    // а то, чем теперь заканчивается раздел.
+    const paragraph = document.createElement('p');
+    paragraph.appendChild(document.createElement('br'));
+    end.insertAdjacentElement('afterend', paragraph);
+    await sleep(300);
+
+    const created = sectionEnd(canvas, findHeading() || heading);
+    if (isTextBlock(created) && !clean(created.textContent)) {
+      caretAtEnd(canvas, created);
+      await sleep(150);
+      return 'новая строка после последнего макета раздела';
+    }
+
+    // Редактор пустую строку не принял. В начало следующего заголовка
+    // вставать нельзя — он от этого перестаёт быть заголовком, поэтому
+    // отступаем к последней обычной строке раздела.
+    const fallback = lastTextBlockOf(canvas, findHeading() || heading);
+    if (!fallback) {
+      throw new Error(
+        'в конце раздела некуда поставить курсор: раздел состоит из макетов, ' +
+          'а пустую строку редактор не принял'
+      );
+    }
+
+    caretAtEnd(canvas, fallback);
+    await sleep(150);
+    await pressEnter(canvas);
+    await sleep(150);
+    return 'новая строка перед макетами раздела (в самый конец встать не удалось)';
+  }
+
+  // Слепок структуры полотна: по нему сверяем, что вставка ничего не съела.
+  function structureSnapshot(canvas) {
+    return {
+      html: canvas.innerHTML,
+      headings: [...canvas.querySelectorAll('h1, h2, h3')].map(
+        (h) => `${h.tagName} «${blockText(h)}»`
+      ),
+      embedded: [...canvas.querySelectorAll('.m-embedded')].map(
+        (e) => e.getAttribute('data-article-id') || '?'
+      ),
+      grids: canvas.querySelectorAll('.m-grid').length,
+    };
+  }
+
+  // Что должно добавиться на полотно после вставки этого куска разметки
+  function expectedFromHtml(html) {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html || '';
+    return {
+      grids: tmp.querySelectorAll('.m-grid').length,
+      embedded: [...tmp.querySelectorAll('.m-embedded')].map(
+        (e) => e.getAttribute('data-article-id') || '?'
+      ),
+    };
+  }
+
+  // Что из прежнего содержимого пропало (с учётом повторов)
+  function lost(before, after) {
+    const rest = [...after];
+    const gone = [];
+    for (const item of before) {
+      const at = rest.indexOf(item);
+      if (at === -1) gone.push(item);
+      else rest.splice(at, 1);
+    }
+    return gone;
+  }
+
+  // Разбор последствий вставки: пустая строка — всё хорошо.
+  function damageReport(before, after, expected) {
+    const goneHeadings = lost(before.headings, after.headings);
+    if (goneHeadings.length) {
+      return `вставка испортила заголовки (пропали: ${goneHeadings.join(', ')})`;
+    }
+
+    const goneEmbedded = lost(before.embedded, after.embedded);
+    if (goneEmbedded.length) {
+      return (
+        `вставка удалила макеты раздела ` +
+        `(пропали встроенные страницы: ${goneEmbedded.join(', ')})`
+      );
+    }
+
+    const wantGrids = before.grids + expected.grids;
+    if (after.grids !== wantGrids) {
+      return `макетов на странице ${after.grids}, а должно быть ${wantGrids}`;
+    }
+
+    const missing = lost(expected.embedded, after.embedded);
+    if (missing.length) {
+      return `вставленный макет потерял ссылку на страницу ${missing.join(', ')}`;
+    }
+    return '';
+  }
+
+  // Вернулась ли структура к исходной: точное совпадение разметки требовать
+  // нельзя — редактор всё равно перерисует её по-своему.
+  const sameStructure = (before, now) =>
+    lost(before.headings, now.headings).length === 0 &&
+    lost(before.embedded, now.embedded).length === 0 &&
+    now.grids === before.grids;
+
+  // Откат неудачной вставки: редактор помнит историю, поэтому жмём Ctrl+Z,
+  // пока разметка не совпадёт с исходной.
+  async function undoTo(canvas, before) {
+    const html = before.html;
+    const options = {
+      key: 'z',
+      code: 'KeyZ',
+      keyCode: 90,
+      which: 90,
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    };
+
+    const restored = () =>
+      canvas.innerHTML === html ||
+      sameStructure(before, structureSnapshot(canvas));
+
+    for (let i = 0; i < 6 && !restored(); i += 1) {
+      canvas.focus();
+      canvas.dispatchEvent(new KeyboardEvent('keydown', options));
+      canvas.dispatchEvent(new KeyboardEvent('keyup', options));
+      await sleep(250);
+      if (restored()) break;
+      document.execCommand('undo');
+      await sleep(250);
+    }
+    return restored();
   }
 
   async function pressEnter(canvas) {
@@ -428,22 +625,37 @@ async function kmsStep(step, payload) {
         const heading = headings[payload.headingIndex];
         if (!heading) throw new Error('раздел не найден на полотне');
 
-        const end = sectionEnd(canvas, heading);
-        if (!end) throw new Error('не удалось определить конец раздела');
+        const before = structureSnapshot(canvas);
+        const expected = expectedFromHtml(payload.html);
 
-        caretAtEnd(canvas, end);
-        await sleep(200);
+        const where = await insertionPoint(canvas, payload.headingIndex);
 
         // Макет вставляем через insertHTML — так он приживается в схеме
         // редактора вместе с m-grid и m-embedded (проверено скриптом консоли).
-        const before = canvas.innerHTML;
+        const beforeInsert = canvas.innerHTML;
         const inserted = document.execCommand('insertHTML', false, payload.html);
         await sleep(400);
 
-        if (!inserted || canvas.innerHTML === before) {
+        if (!inserted || canvas.innerHTML === beforeInsert) {
           await pasteInto(canvas, htmlToPlainText(payload.html), payload.html);
         }
-        return { ok: true, result: { done: true } };
+        await sleep(300);
+
+        // Проверяем, что вставка ничего не сломала: заголовки на месте,
+        // прежние макеты целы, новый — добавился.
+        const damage = damageReport(before, structureSnapshot(canvas), expected);
+        if (damage) {
+          const restored = await undoTo(canvas, before);
+          throw new Error(
+            `${damage}. ` +
+              (restored
+                ? 'Вставка отменена, страница осталась прежней.'
+                : 'Отменить вставку не удалось — проверьте страницу вручную ' +
+                  'и не публикуйте её, пока разметка не в порядке.')
+          );
+        }
+
+        return { ok: true, result: { done: true, where } };
       }
 
       case 'insert-link': {
@@ -452,16 +664,33 @@ async function kmsStep(step, payload) {
         const heading = headings[payload.headingIndex];
         if (!heading) throw new Error('раздел не найден на полотне');
 
-        // Ссылку ставим сразу за последней непустой строкой раздела
-        const end = sectionEnd(canvas, heading, true);
-        if (!end) throw new Error('не удалось определить конец раздела');
+        const before = structureSnapshot(canvas);
 
-        caretAtEnd(canvas, end);
-        await sleep(200);
-        await pressEnter(canvas);
+        // Ссылку ставим сразу за последней непустой строкой раздела. Точку
+        // вставки готовим так же, как для макета: встать в конец макета
+        // нельзя — курсор уедет в следующий заголовок.
+        const where = await insertionPoint(canvas, payload.headingIndex, true);
+
         // Ссылку вставляем обычным текстом: редактор сам превращает её в ссылку
         await pasteInto(canvas, payload.url, null);
-        return { ok: true, result: { done: true } };
+        await sleep(300);
+
+        const damage = damageReport(before, structureSnapshot(canvas), {
+          grids: 0,
+          embedded: [],
+        });
+        if (damage) {
+          const restored = await undoTo(canvas, before);
+          throw new Error(
+            `${damage}. ` +
+              (restored
+                ? 'Вставка отменена, страница осталась прежней.'
+                : 'Отменить вставку не удалось — проверьте страницу вручную ' +
+                  'и не публикуйте её, пока разметка не в порядке.')
+          );
+        }
+
+        return { ok: true, result: { done: true, where } };
       }
 
       // ---------------------------------------------------------------- фаза 5
