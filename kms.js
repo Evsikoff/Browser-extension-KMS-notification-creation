@@ -35,12 +35,122 @@ async function kmsStep(step, payload) {
     input.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  const findByText = (selector, text) =>
-    [...document.querySelectorAll(selector)].find(
-      (b) => b.textContent.trim() === text
+  const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+
+  // ------------------------------------------------- мастер публикации
+  // Подписи кнопок сравниваем по нормализованному тексту: внутри кнопки
+  // бывают вложенные элементы и неразрывные пробелы, поэтому строгое
+  // сравнение textContent иногда не срабатывает.
+  const normText = (s) =>
+    clean(String(s || '').replace(/ /g, ' '))
+      .toLowerCase()
+      .replace(/ё/g, 'е');
+
+  const wizardRoot = () =>
+    document.querySelector('.popup__container .wizard-wrapper') ||
+    document.querySelector('.popup__container');
+
+  const isVisible = (el) =>
+    Boolean(
+      el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length)
     );
 
-  const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+  const isDisabled = (b) =>
+    Boolean(
+      b.disabled ||
+        b.getAttribute('aria-disabled') === 'true' ||
+        /disabled/.test(b.className)
+    );
+
+  const wizardButtons = () => {
+    const root = wizardRoot();
+    if (!root) return [];
+    return [...root.querySelectorAll('button')].filter(isVisible);
+  };
+
+  const wizardButton = (text) =>
+    wizardButtons().find((b) => normText(b.textContent) === normText(text));
+
+  // Кнопки шага мастера, кроме служебных. Если после отсева осталась ровно
+  // одна — это и есть завершающая кнопка, как бы она ни называлась.
+  const SERVICE_LABELS = ['отмена', 'назад', 'закрыть', 'продолжить', ''];
+
+  const soleFinalAction = () => {
+    const root = wizardRoot();
+    if (!root) return null;
+    const actions = [...root.querySelectorAll('button.wizard-wrapper__action')]
+      .filter(isVisible)
+      .filter((b) => !SERVICE_LABELS.includes(normText(b.textContent)));
+    return actions.length === 1 ? actions[0] : null;
+  };
+
+  const describeButtons = () =>
+    wizardButtons()
+      .map(
+        (b) =>
+          `«${clean(b.textContent) || '·'}»${
+            isDisabled(b) ? ' (неактивна)' : ''
+          }`
+      )
+      .join(', ') || 'кнопок в окне нет';
+
+  // Клик «как рукой»: часть компонентов реагирует не на click, а на
+  // mousedown/pointerdown, и не видит кнопку, если она вне области прокрутки.
+  async function realClick(el) {
+    el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    await sleep(80);
+
+    const options = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+    };
+    el.dispatchEvent(new PointerEvent('pointerdown', options));
+    el.dispatchEvent(new MouseEvent('mousedown', options));
+    try {
+      el.focus();
+    } catch (e) {
+      /* кнопка не принимает фокус */
+    }
+    el.dispatchEvent(new PointerEvent('pointerup', options));
+    el.dispatchEvent(new MouseEvent('mouseup', options));
+    el.click();
+    await sleep(100);
+  }
+
+  // Поле «Уведомление» в мастере публикации. Шаги мастера могут оставаться в
+  // разметке скрытыми, поэтому по умолчанию берём только видимое поле: иначе
+  // текст уйдёт в поле следующего шага, а мастер останется на текущем.
+  const findNoteField = (allowHidden = false) => {
+    const root = wizardRoot();
+    if (!root) return null;
+
+    const candidates = [
+      ...root.querySelectorAll('.versioning-wrapper__notification textarea'),
+      ...[...root.querySelectorAll('textarea')].filter((t) => {
+        const label = t.closest('div, label');
+        const around = label ? label.textContent : '';
+        return /уведомл/i.test(`${t.placeholder || ''} ${around}`);
+      }),
+      ...root.querySelectorAll('textarea'),
+    ];
+
+    return (
+      candidates.find(isVisible) || (allowHidden ? candidates[0] || null : null)
+    );
+  };
+
+  // React включает завершающую кнопку по своему onBlur, а он подписан на
+  // focusout: события «blur» ему недостаточно, поэтому снимаем фокус
+  // по-настоящему и добавляем focusout.
+  async function fillNotification(field, text) {
+    field.focus();
+    setNativeValue(field, text);
+    field.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    field.blur();
+    await sleep(300);
+  }
 
   const findCanvas = () =>
     document.querySelector(
@@ -411,10 +521,11 @@ async function kmsStep(step, payload) {
       }
 
       case 'continue': {
-        const btn = await waitFor(() =>
-          findByText('button.wizard-wrapper__action', 'Продолжить')
-        );
-        btn.click();
+        const btn = await waitFor(() => {
+          const b = wizardButton('Продолжить');
+          return b && !isDisabled(b) ? b : null;
+        });
+        await realClick(btn);
         await sleep(600);
         return { ok: true, result: { done: true } };
       }
@@ -423,7 +534,7 @@ async function kmsStep(step, payload) {
         const ta = await waitFor(() =>
           document.querySelector('.versioning-wrapper__notification textarea')
         );
-        setNativeValue(ta, payload);
+        await fillNotification(ta, payload);
         return { ok: true, result: { done: true } };
       }
 
@@ -443,42 +554,31 @@ async function kmsStep(step, payload) {
           await sleep(600);
         }
 
-        const findNote = () =>
-          document.querySelector(
-            '.versioning-wrapper__notification textarea'
-          ) ||
-          [
-            ...document.querySelectorAll(
-              '.popup__container textarea, .wizard-wrapper textarea'
-            ),
-          ].find((t) => {
-            const label = t.closest('div, label');
-            const around = label ? label.textContent : '';
-            return /уведомл/i.test(`${t.placeholder || ''} ${around}`);
-          }) ||
-          document.querySelector('.popup__container textarea');
-
-        let note = findNote();
+        let note = findNoteField();
         let clicks = 0;
 
         while (!note && clicks < 8) {
-          const next = findByText('button.wizard-wrapper__action', 'Продолжить');
+          const next = wizardButton('Продолжить');
           if (!next) break;
-          if (next.disabled || next.className.includes('--disabled')) {
+          if (isDisabled(next)) {
             await sleep(500);
-            note = findNote();
+            note = findNoteField();
             continue;
           }
-          next.click();
+          await realClick(next);
           clicks += 1;
           await sleep(900);
-          note = findNote();
+          note = findNoteField();
         }
+
+        // Поля не видно ни на одном шаге — пробуем скрытое: дальше шаг
+        // завершения всё равно проведёт мастер до конца и повторит ввод.
+        if (!note) note = findNoteField(true);
 
         if (!note) {
           throw new Error(
             `поле «Уведомление» не найдено в мастере публикации ` +
-              `(шагов «Продолжить»: ${clicks})`
+              `(шагов «Продолжить»: ${clicks}; в окне: ${describeButtons()})`
           );
         }
 
@@ -486,12 +586,9 @@ async function kmsStep(step, payload) {
         // значение, поэтому пишем, проверяем и при необходимости повторяем.
         let value = '';
         for (let attempt = 0; attempt < 4; attempt += 1) {
-          note.focus();
-          setNativeValue(note, payload);
-          note.dispatchEvent(new Event('blur', { bubbles: true }));
-          await sleep(400);
+          await fillNotification(note, payload);
 
-          const live = findNote() || note;
+          const live = findNoteField() || note;
           note = live;
           value = live.value;
           if (value === payload) break;
@@ -503,15 +600,78 @@ async function kmsStep(step, payload) {
           );
         }
 
-        return { ok: true, result: { clicks, value } };
+        return { ok: true, result: { clicks, value, buttons: describeButtons() } };
       }
 
+      // Завершение мастера. Кнопка «Завершить» появляется не всегда сразу
+      // после поля «Уведомление»: у части страниц за ним есть ещё шаг, а сама
+      // кнопка какое-то время остаётся неактивной, пока форма не увидит
+      // введённый текст. Поэтому не ищем кнопку один раз, а доводим мастер
+      // до конца: дожимаем «Продолжить», подтверждаем текст уведомления и
+      // проверяем, что клик по «Завершить» действительно сработал.
       case 'finish': {
-        const btn = await waitFor(() =>
-          findByText('button.wizard-wrapper__action', 'Завершить')
+        const noteText =
+          payload && typeof payload === 'object' ? payload.note : payload;
+
+        const t0 = Date.now();
+        let advanced = 0;
+        let attempts = 0;
+
+        while (Date.now() - t0 < 45000) {
+          if (!wizardRoot()) {
+            return { ok: true, result: { done: true, closed: true, advanced } };
+          }
+
+          const finish = wizardButton('Завершить') || soleFinalAction();
+
+          if (finish) {
+            const label = clean(finish.textContent);
+
+            if (!isDisabled(finish)) {
+              await realClick(finish);
+              attempts += 1;
+              await sleep(800);
+
+              // Клик засчитан, если мастер закрылся или ушёл с этого шага
+              if (!wizardRoot() || !wizardButton(label)) {
+                return {
+                  ok: true,
+                  result: { done: true, clicked: label, advanced, attempts },
+                };
+              }
+              await sleep(700);
+              continue;
+            }
+
+            // Кнопка неактивна: обычно форма ещё не приняла текст уведомления
+            const field = findNoteField(true);
+            if (field && noteText) await fillNotification(field, noteText);
+            await sleep(600);
+            continue;
+          }
+
+          const next = wizardButton('Продолжить');
+          if (next && !isDisabled(next) && advanced < 8) {
+            await realClick(next);
+            advanced += 1;
+            await sleep(900);
+
+            // После перехода поле «Уведомление» может появиться пустым
+            const field = findNoteField();
+            if (field && noteText && field.value !== noteText) {
+              await fillNotification(field, noteText);
+            }
+            continue;
+          }
+
+          await sleep(500);
+        }
+
+        throw new Error(
+          `не удалось завершить мастер публикации ` +
+            `(нажатий «Завершить»: ${attempts}, доп. шагов «Продолжить»: ` +
+            `${advanced}; в окне: ${describeButtons()})`
         );
-        btn.click();
-        return { ok: true, result: { done: true } };
       }
 
       case 'wizard-closed': {

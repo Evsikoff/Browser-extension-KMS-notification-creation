@@ -634,7 +634,9 @@ async function publishFlow(tabId, note) {
   await exec(tabId, 'modal-nav');
   for (let i = 0; i < 3; i += 1) await exec(tabId, 'continue');
   await exec(tabId, 'notification', note);
-  await exec(tabId, 'finish');
+  // Текст уведомления отдаём и шагу завершения: если мастер вернёт поле
+  // пустым или кнопка «Завершить» окажется неактивной, шаг заполнит его сам.
+  await exec(tabId, 'finish', { note });
 }
 
 // Публикация изменений существующей страницы (фазы 6 и 7): число шагов
@@ -645,9 +647,19 @@ async function publishExistingPage(tabId, note) {
   const result = await exec(tabId, 'publish-wizard', note);
   log(
     `Поле «Уведомление» заполнено: «${result.value}» ` +
-      `(шагов «Продолжить»: ${result.clicks}).`
+      `(шагов «Продолжить»: ${result.clicks}). Кнопки окна: ${result.buttons}.`
   );
-  await exec(tabId, 'finish');
+
+  const finished = await exec(tabId, 'finish', { note });
+  log(
+    finished.closed
+      ? 'Мастер публикации закрылся сам.'
+      : `Нажата кнопка «${finished.clicked}»` +
+          (finished.advanced
+            ? ` (перед ней пришлось пройти ещё шагов: ${finished.advanced}).`
+            : '.')
+  );
+
   await exec(tabId, 'wizard-closed');
 }
 
