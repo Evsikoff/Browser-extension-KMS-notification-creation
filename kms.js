@@ -603,6 +603,32 @@ async function kmsStep(step, payload) {
         return { ok: true, result: { clicks, value, buttons: describeButtons() } };
       }
 
+      // Снимок состояния мастера без единого действия. Панель опрашивает
+      // его, пока кнопка «Завершить» неактивна, и пишет об этом в журнал.
+      case 'wizard-state': {
+        if (!wizardRoot()) return { ok: true, result: { open: false } };
+
+        const finish = wizardButton('Завершить') || soleFinalAction();
+        const next = wizardButton('Продолжить');
+        const field = findNoteField(true);
+
+        return {
+          ok: true,
+          result: {
+            open: true,
+            finish: finish
+              ? {
+                  label: clean(finish.textContent),
+                  disabled: isDisabled(finish),
+                }
+              : null,
+            next: next ? { disabled: isDisabled(next) } : null,
+            note: field ? { value: field.value, visible: isVisible(field) } : null,
+            buttons: describeButtons(),
+          },
+        };
+      }
+
       // Завершение мастера. Кнопка «Завершить» появляется не всегда сразу
       // после поля «Уведомление»: у части страниц за ним есть ещё шаг, а сама
       // кнопка какое-то время остаётся неактивной, пока форма не увидит

@@ -13,6 +13,13 @@ const noteNotificationAdded = (title) => `Добавлено уведомлен�
 const PACKAGE_WAIT_SECONDS = 180; // страницы пакетов открываются долго
 const MAIN_PAGE_WAIT_SECONDS = 30; // головная страница — быстрее
 
+// Кнопка «Завершить» в мастере публикации бывает неактивна ещё какое-то
+// время после того, как заполнено поле «Уведомление»: KMS досчитывает
+// изменения страницы. Это не ошибка — её надо переждать.
+const FINISH_POLL_SECONDS = 10; // как часто перепроверяем кнопку
+const FINISH_WAIT_SECONDS = 300; // сколько ждём, прежде чем спросить пользователя
+const FINISH_LOG_SECONDS = 30; // как часто напоминаем в журнале, что ждём
+
 // ============================================================================
 // Состояние
 // ============================================================================
@@ -627,6 +634,157 @@ function goToContent() {
 // Фазы 5–7. Автоматическая работа со страницами KMS
 // ============================================================================
 
+// Ждём, пока кнопка «Завершить» станет активной. Опрашиваем мастер раз в
+// FINISH_POLL_SECONDS секунд и пишем в журнал, чего именно ждём: молчаливая
+// пауза выглядит как зависание расширения.
+// Возвращает 'ready' | 'closed' | 'timeout'.
+async function waitForFinishButton(tabId, note, seconds) {
+  const startedAt = Date.now();
+  const elapsed = () => Math.round((Date.now() - startedAt) / 1000);
+
+  let reported = ''; // чтобы не повторять в журнале одно и то же
+  let lastLogAt = 0;
+  let checks = 0;
+  let repairs = 0;
+
+  ui.timer.hidden = false;
+  const tick = setInterval(() => {
+    ui.timerValue.textContent = fmtTime(Math.max(0, seconds - elapsed()));
+  }, 500);
+  ui.timerValue.textContent = fmtTime(seconds);
+
+  try {
+    while (elapsed() < seconds) {
+      const state = await exec(tabId, 'wizard-state');
+      checks += 1;
+
+      if (!state.open) return 'closed';
+
+      // Кнопка активна — либо мастер стоит на промежуточном шаге, дальше
+      // его проведёт сам шаг завершения.
+      if (state.finish && !state.finish.disabled) {
+        if (checks > 1) {
+          log(
+            `Кнопка «${state.finish.label}» стала активной через ` +
+              `${fmtTime(elapsed())} (проверок: ${checks}).`
+          );
+        }
+        return 'ready';
+      }
+      if (!state.finish && state.next && !state.next.disabled) return 'ready';
+
+      // Текст уведомления мог слететь при перерисовке — вписываем заново,
+      // иначе кнопка не включится никогда. Больше трёх попыток не делаем:
+      // если поле упорно показывает своё, дальше просто ждём и не засоряем
+      // журнал одинаковыми строками.
+      if (state.note && note && state.note.value !== note && repairs < 3) {
+        repairs += 1;
+        log(
+          `Текст уведомления пропал из поля — вписываю заново ` +
+            `(попытка ${repairs} из 3).`
+        );
+        try {
+          await exec(tabId, 'publish-wizard', note);
+        } catch (e) {
+          log(`Вписать текст уведомления не удалось: ${e.message}. Жду дальше.`);
+        }
+      }
+
+      const what = state.finish
+        ? `кнопка «${state.finish.label}» пока неактивна`
+        : `кнопка «Завершить» ещё не появилась (в окне: ${state.buttons})`;
+
+      setStatus(
+        ui.workStatus,
+        `Мастер публикации открыт, ${what}. Жду и перепроверяю каждые ` +
+          `${FINISH_POLL_SECONDS} секунд — уже ${fmtTime(elapsed())}. ` +
+          'Закрывать окно и нажимать что-либо вручную не нужно.'
+      );
+
+      // В журнал пишем при первом обнаружении и потом изредка, чтобы было
+      // видно, что мастер жив, но журнал не заплывал одинаковыми строками.
+      if (what !== reported) {
+        log(
+          `Мастер публикации: ${what}. Жду, перепроверяю каждые ` +
+            `${FINISH_POLL_SECONDS} секунд.`
+        );
+        reported = what;
+        lastLogAt = elapsed();
+      } else if (elapsed() - lastLogAt >= FINISH_LOG_SECONDS) {
+        log(`Всё ещё жду: ${what} (${fmtTime(elapsed())}, проверок: ${checks}).`);
+        lastLogAt = elapsed();
+      }
+
+      await sleep(FINISH_POLL_SECONDS * 1000);
+    }
+    return 'timeout';
+  } finally {
+    clearInterval(tick);
+    ui.timer.hidden = true;
+  }
+}
+
+// Завершение мастера публикации: сначала дожидаемся активной кнопки, потом
+// нажимаем. Если кнопка так и не ожила — спрашиваем пользователя, ждать ли
+// дальше, а не падаем с ошибкой сразу.
+async function finishWizard(tabId, note) {
+  let failures = 0;
+  let reason = '';
+
+  while (true) {
+    const state = await waitForFinishButton(tabId, note, FINISH_WAIT_SECONDS);
+
+    if (state === 'closed') {
+      log('Мастер публикации закрылся сам.');
+      return;
+    }
+
+    if (state === 'ready') {
+      try {
+        const finished = await exec(tabId, 'finish', { note });
+        log(
+          finished.closed
+            ? 'Мастер публикации закрылся сам.'
+            : `Нажата кнопка «${finished.clicked}»` +
+                (finished.advanced
+                  ? ` (перед ней пришлось пройти ещё шагов: ${finished.advanced}).`
+                  : '.')
+        );
+        return;
+      } catch (e) {
+        // Кнопка успела снова стать неактивной — это не повод падать,
+        // возвращаемся к ожиданию.
+        failures += 1;
+        reason = e.message;
+        log(`Нажатие не прошло: ${e.message}.`);
+        if (failures < 3) {
+          log('Возвращаюсь к ожиданию активной кнопки.');
+          continue;
+        }
+      }
+    } else {
+      reason = `кнопка не стала активной за ${fmtTime(FINISH_WAIT_SECONDS)}`;
+    }
+
+    log(`Мастер публикации не завершён (${reason}) — спрашиваю, что делать.`);
+
+    const answer = await ask(
+      `Мастер публикации не удалось завершить: ${reason}. Окно мастера ` +
+        'открыто в фоновой вкладке — публикацию можно завершить там вручную. ' +
+        'Что делаем?',
+      [
+        { label: 'Подождать ещё', value: 'wait', primary: true },
+        { label: 'Прекратить ожидание', value: 'stop' },
+      ]
+    );
+
+    if (answer === 'stop') throw new Error(reason);
+
+    failures = 0;
+    log('Жду кнопку «Завершить» дальше.');
+  }
+}
+
 // Публикация новой страницы (фаза 5): последовательность проверена
 // на форме создания.
 async function publishFlow(tabId, note) {
@@ -634,9 +792,7 @@ async function publishFlow(tabId, note) {
   await exec(tabId, 'modal-nav');
   for (let i = 0; i < 3; i += 1) await exec(tabId, 'continue');
   await exec(tabId, 'notification', note);
-  // Текст уведомления отдаём и шагу завершения: если мастер вернёт поле
-  // пустым или кнопка «Завершить» окажется неактивной, шаг заполнит его сам.
-  await exec(tabId, 'finish', { note });
+  await finishWizard(tabId, note);
 }
 
 // Публикация изменений существующей страницы (фазы 6 и 7): число шагов
@@ -650,16 +806,7 @@ async function publishExistingPage(tabId, note) {
       `(шагов «Продолжить»: ${result.clicks}). Кнопки окна: ${result.buttons}.`
   );
 
-  const finished = await exec(tabId, 'finish', { note });
-  log(
-    finished.closed
-      ? 'Мастер публикации закрылся сам.'
-      : `Нажата кнопка «${finished.clicked}»` +
-          (finished.advanced
-            ? ` (перед ней пришлось пройти ещё шагов: ${finished.advanced}).`
-            : '.')
-  );
-
+  await finishWizard(tabId, note);
   await exec(tabId, 'wizard-closed');
 }
 
