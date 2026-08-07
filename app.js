@@ -427,7 +427,10 @@ async function runStructureCheck() {
     await waitTabComplete(tab.id);
     if (aborted()) return;
 
-    const { packs, orphanSubjects } = await exec(tab.id, 'scan-structure');
+    const { packs, orphanSubjects, ignored } = await exec(
+      tab.id,
+      'scan-structure'
+    );
     if (aborted()) return;
 
     if (packs.length === 0) {
@@ -492,6 +495,12 @@ async function runStructureCheck() {
     }
     if (orphanSubjects > 0) {
       notes.push(`тем выше первого пакета: ${orphanSubjects} (не учтены)`);
+    }
+    if (ignored.headings.length > 0) {
+      notes.push(
+        `пропущены служебные заголовки: ${ignored.headings.join('; ')}` +
+          (ignored.subjects > 0 ? ` (тем внутри: ${ignored.subjects})` : '')
+      );
     }
     const empty = state.structure.filter((p) => p.subjects.length === 0);
     if (empty.length > 0) {

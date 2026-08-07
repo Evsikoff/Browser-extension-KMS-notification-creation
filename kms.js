@@ -166,6 +166,12 @@ async function kmsStep(step, payload) {
     return clean(copy.textContent);
   }
 
+  // Служебные заголовки первого уровня головной страницы: пакетами они не
+  // являются, поэтому в структуру не попадают — ни сами, ни темы под ними.
+  const IGNORED_PACK_HEADINGS = ['контент'];
+
+  const isIgnoredPack = (text) => IGNORED_PACK_HEADINGS.includes(normText(text));
+
   // Блоки, из которых состоит текст страницы. Заголовки первого и второго
   // уровня задают структуру, остальное — обычные строки.
   const BLOCK_SELECTOR =
@@ -539,13 +545,29 @@ async function kmsStep(step, payload) {
         }
 
         const packs = [];
+        const ignoredHeadings = [];
         let orphanSubjects = 0;
+        let ignoredSubjects = 0;
+        let inIgnored = false; // идём внутри служебного заголовка
         let pack = null;
         let subject = null;
 
         for (const el of root.querySelectorAll(BLOCK_SELECTOR)) {
           if (el.tagName === 'H1') {
-            pack = { text: blockText(el), subjects: [] };
+            const text = blockText(el);
+
+            // Служебный заголовок: ни он, ни его содержимое в структуру
+            // не идут — до следующего заголовка первого уровня.
+            if (isIgnoredPack(text)) {
+              ignoredHeadings.push(text);
+              inIgnored = true;
+              pack = null;
+              subject = null;
+              continue;
+            }
+
+            inIgnored = false;
+            pack = { text, subjects: [] };
             subject = null;
             packs.push(pack);
             continue;
@@ -553,7 +575,8 @@ async function kmsStep(step, payload) {
 
           if (el.tagName === 'H2') {
             if (!pack) {
-              orphanSubjects += 1;
+              if (inIgnored) ignoredSubjects += 1;
+              else orphanSubjects += 1;
               subject = null;
               continue;
             }
@@ -567,7 +590,14 @@ async function kmsStep(step, payload) {
           if (text) subject.lastLine = text;
         }
 
-        return { ok: true, result: { packs, orphanSubjects } };
+        return {
+          ok: true,
+          result: {
+            packs,
+            orphanSubjects,
+            ignored: { headings: ignoredHeadings, subjects: ignoredSubjects },
+          },
+        };
       }
 
       // ------------------------------------------------- редактор: готовность
@@ -605,7 +635,9 @@ async function kmsStep(step, payload) {
 
         for (const node of canvas.querySelectorAll('h1, h2')) {
           if (node.tagName === 'H1') {
-            pack = blockText(node) || clean(node.textContent);
+            const text = blockText(node) || clean(node.textContent);
+            // Служебный заголовок пакетом не считается — как и в фазе 2
+            pack = isIgnoredPack(text) ? '' : text;
             continue;
           }
           index += 1;
