@@ -303,6 +303,25 @@ async function kmsStep(step, payload) {
     element.scrollIntoView({ block: 'center', inline: 'nearest' });
   }
 
+  // Позиция между блоками верхнего уровня. Для структурного блока это
+  // принципиально не то же самое, что caretAtEnd: курсор внутри m-grid
+  // ProseMirror переносит в соседний заголовок, а позицию после m-grid может
+  // превратить в обычный абзац именно там, где заканчивается раздел.
+  function caretAfter(canvas, element) {
+    const block = topLevelOf(canvas, element);
+    if (!block || block.parentElement !== canvas) return false;
+
+    canvas.focus();
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.setStartAfter(block);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    block.scrollIntoView({ block: 'center', inline: 'nearest' });
+    return true;
+  }
+
   function htmlToPlainText(html) {
     const tmp = document.createElement('div');
     tmp.innerHTML = html;
@@ -383,12 +402,31 @@ async function kmsStep(step, payload) {
       return `новая строка после ${shortText(end)}${heads(end)}`;
     }
 
-    // Раздел заканчивается макетом или таблицей: заводим пустую строку сами
-    // и проверяем не ссылку на свой узел (редактор мог заменить его своим),
-    // а то, чем теперь заканчивается раздел.
+    // Раздел заканчивается макетом или таблицей. Сначала просим сам редактор
+    // создать строку в DOM-позиции между структурным блоком и следующим
+    // заголовком. Это безопаснее прямой перестановки уже вставленного макета:
+    // такую перестановку ProseMirror может ошибочно применить к первому
+    // существующему макету раздела и изменить его тип.
+    if (caretAfter(canvas, end)) {
+      await sleep(150);
+      await pressEnter(canvas);
+      await sleep(300);
+
+      const createdByEditor = sectionEnd(canvas, findHeading() || heading);
+      if (isTextBlock(createdByEditor) && !clean(createdByEditor.textContent)) {
+        caretAtEnd(canvas, createdByEditor);
+        await sleep(150);
+        return 'новая строка после последнего макета раздела';
+      }
+    }
+
+    // Резерв для версий редактора, которые не обрабатывают Enter в позиции
+    // между блоками. Проверяем не ссылку на созданный узел (редактор мог его
+    // заменить), а фактический конец раздела.
     const paragraph = document.createElement('p');
     paragraph.appendChild(document.createElement('br'));
-    end.insertAdjacentElement('afterend', paragraph);
+    const currentEnd = sectionEnd(canvas, findHeading() || heading);
+    currentEnd.insertAdjacentElement('afterend', paragraph);
     await sleep(300);
 
     const created = sectionEnd(canvas, findHeading() || heading);
@@ -440,64 +478,14 @@ async function kmsStep(step, payload) {
     );
   }
 
-  // Текст блока без указанного узла: по нему видно, есть ли в блоке что-то,
-  // кроме самой вставки.
-  function textBeside(block, node) {
-    if (block === node) return '';
-    let text = '';
-
-    const walk = (el) => {
-      for (const child of el.childNodes) {
-        if (child === node) continue;
-        if (child.nodeType === 3) text += child.textContent;
-        else if (child.nodeType === 1) walk(child);
-      }
-    };
-
-    walk(block);
-    return clean(text);
-  }
-
-  // Блок, после которого должна встать вставка: последний непустой блок
-  // раздела, не считая её самой. Пустые строки в хвосте раздела оставляем
-  // последними — их держат вручную, чтобы редактору было куда ставить
-  // курсор в следующий раз.
-  function endAnchor(canvas, heading, node) {
-    let anchor = topLevelOf(canvas, heading);
-
-    for (const block of sectionBlocks(canvas, heading)) {
-      // Сама вставка точкой отсчёта быть не может
-      if (block === node) continue;
-
-      // Блок, внутрь которого попала вставка: пропускаем, если ничего
-      // другого в нём нет.
-      if (block.contains(node) && !textBeside(block, node)) continue;
-
-      // Пустые строки в хвосте раздела вставку не отодвигают
-      if (isTextBlock(block) && !clean(block.textContent)) continue;
-
-      anchor = block;
-    }
-    return anchor;
-  }
-
   // Проверка места: вставка должна оказаться в конце раздела — после всего,
-  // что там было. Редактор ни insertHTML, ни синтетическую вставку сам не
-  // выполняет: он замечает правку разметки и перечитывает изменённый кусок,
-  // сверяя его со своим документом. Когда в разделе идут подряд похожие
-  // блоки, сличение неоднозначно, и редактор нередко решает, что новое
-  // появилось перед прежним. Пустая строка в конце раздела тут не помогает:
-  // курсор стоит правильно, место выбирает редактор. Поэтому проверяем
-  // результат и при необходимости переносим узел в конец раздела сами.
-  //
-  // find     — где искать вставку на полотне (узлы редактор подменяет
-  //            своими, поэтому ищем заново после каждой правки);
-  // movable  — можно ли переносить найденный узел, не потянув за собой
-  //            чужой текст.
-  async function placeAtSectionEnd(canvas, headingIndex, find, movable) {
+  // что там было. Узел намеренно не переставляем напрямую через DOM. Для
+  // ProseMirror такой перенос не является редакторской транзакцией: при
+  // разборе мутации он может применить тип нового макета к первому старому.
+  // Если штатная вставка не попала в конец, откатываем её целиком.
+  function placeAtSectionEnd(canvas, headingIndex, find) {
     const findHeading = () => [...canvas.querySelectorAll('h2')][headingIndex];
     const fail = (reason) => ({ ok: false, reason });
-    const canMove = movable || (() => true);
 
     const look = () => {
       const heading = findHeading();
@@ -517,14 +505,7 @@ async function kmsStep(step, payload) {
         .slice(s.blocks.indexOf(s.holder) + 1)
         .every((b) => isTextBlock(b) && !clean(b.textContent));
 
-    // Желаемое: вставка стоит сразу за последним непустым блоком раздела,
-    // а пустые строки остаются в самом конце.
-    const tidy = (s) =>
-      atEnd(s) &&
-      s.node.parentElement === canvas &&
-      s.node.previousElementSibling === endAnchor(canvas, s.heading, s.node);
-
-    let state = look();
+    const state = look();
     if (!state.heading) return fail('раздел не найден на полотне');
     if (!state.node) return fail('вставку не нашёл на полотне');
     if (!state.holder) return fail('вставка оказалась вне выбранного раздела');
@@ -532,55 +513,68 @@ async function kmsStep(step, payload) {
     // Место в разделе: «3 из 5» — третий блок из пяти
     const place = (s) =>
       `${s.blocks.indexOf(s.holder) + 1} из ${s.blocks.length}`;
-    const wrong = atEnd(state) ? '' : place(state);
-    let moved = false;
-
-    // Переносим вставку в конец раздела. Правку разметки редактор
-    // перечитывает целиком по изменённому куску, поэтому место после
-    // переноса однозначно. Повторяем один раз: раздел он может перерисовать
-    // уже после нашей правки.
-    for (
-      let attempt = 0;
-      attempt < 2 && !tidy(state) && canMove(state.node);
-      attempt += 1
-    ) {
-      const anchor = endAnchor(canvas, findHeading(), state.node);
-      if (!anchor || anchor === state.node) break;
-      anchor.insertAdjacentElement('afterend', state.node);
-      moved = true;
-      await sleep(500);
-
-      state = look();
-      if (!state.node) return fail('после переноса вставка пропала с полотна');
-      if (!state.holder) return fail('после переноса вставка ушла из раздела');
-    }
-
-    // Даём редактору дорисовать раздел и сверяем место ещё раз: правку
-    // разметки он может и откатить.
-    if (moved) {
-      await sleep(500);
-      state = look();
-      if (!state.node) return fail('после переноса вставка пропала с полотна');
-      if (!state.holder) return fail('после переноса вставка ушла из раздела');
-    }
-
-    // Не добившись места сразу за последней строкой, миримся с этим: важно,
-    // что вставка идёт после прежнего содержимого раздела.
     if (!atEnd(state)) {
       return fail(
-        `вставка встала на место ${wrong} среди блоков раздела и осталась ` +
-          `${place(state)} ` +
-          (moved
-            ? 'после переноса — редактор не принял порядок'
-            : 'после вставки — переносить её нельзя, не потянув за собой ' +
-              'чужой текст')
+        `вставка встала на место ${place(state)} среди блоков раздела; ` +
+          'безопасно перенести её средствами редактора не удалось'
       );
     }
 
-    return { ok: true, moved, position: place(state), wrong };
+    return { ok: true, moved: false, position: place(state), wrong: '' };
   }
 
-  // Слепок структуры полотна: по нему сверяем, что вставка ничего не съела.
+  // Адрес ссылки в сопоставимом виде: редактор может заменить относительный
+  // href абсолютным и добавить завершающий слеш, не меняя саму цель.
+  function canonicalHref(value) {
+    try {
+      const url = new URL(String(value || ''), document.baseURI);
+      url.hash = '';
+      return decodeURI(url.href).replace(/\/$/, '');
+    } catch (e) {
+      return clean(value).replace(/\/$/, '');
+    }
+  }
+
+  // Стабильная часть типа макета. Служебные классы состояния не учитываем,
+  // зато сохраняем классы самого grid и его колонок: именно здесь проявляется
+  // баг, когда после DOM-переноса первый макет получает тип нового.
+  function gridStructure(grid) {
+    const nodes = [
+      grid,
+      ...grid.querySelectorAll('.m-grid__aside, .m-grid__column'),
+    ];
+    const classes = nodes.map((node) =>
+      [...node.classList]
+        .filter((name) => /^m-grid(?:--|__)/.test(name))
+        .sort()
+        .join('.')
+    );
+    const embedded = [...grid.querySelectorAll('.m-embedded')].map(
+      (node) => node.getAttribute('data-article-id') || '?'
+    );
+    return `${classes.join('>')}|${embedded.join(',')}`;
+  }
+
+  // Семантический снимок блока нужен для настоящего отката. Сравнения одних
+  // заголовков и макетов недостаточно: оставшаяся после неудачи ссылка не
+  // меняет их и раньше ошибочно считалась уже отменённой.
+  function blockStructure(block) {
+    const links = [...block.querySelectorAll('a[href]')].map((a) =>
+      canonicalHref(a.getAttribute('href') || a.href)
+    );
+    const grids = block.matches('.m-grid')
+      ? [gridStructure(block)]
+      : [...block.querySelectorAll('.m-grid')].map(gridStructure);
+    return JSON.stringify({
+      tag: block.tagName,
+      text: blockText(block),
+      links,
+      grids,
+    });
+  }
+
+  // Слепок структуры полотна: по нему сверяем, что вставка ничего не съела
+  // и не изменила тип уже существующего макета.
   function structureSnapshot(canvas) {
     return {
       html: canvas.innerHTML,
@@ -591,6 +585,8 @@ async function kmsStep(step, payload) {
         (e) => e.getAttribute('data-article-id') || '?'
       ),
       grids: canvas.querySelectorAll('.m-grid').length,
+      gridStructures: [...canvas.querySelectorAll('.m-grid')].map(gridStructure),
+      blocks: [...canvas.children].map(blockStructure),
     };
   }
 
@@ -633,6 +629,11 @@ async function kmsStep(step, payload) {
       );
     }
 
+    const changedGrids = lost(before.gridStructures, after.gridStructures);
+    if (changedGrids.length) {
+      return 'вставка изменила тип или структуру существующего макета';
+    }
+
     const wantGrids = before.grids + expected.grids;
     if (after.grids !== wantGrids) {
       return `макетов на странице ${after.grids}, а должно быть ${wantGrids}`;
@@ -645,12 +646,17 @@ async function kmsStep(step, payload) {
     return '';
   }
 
-  // Вернулась ли структура к исходной: точное совпадение разметки требовать
-  // нельзя — редактор всё равно перерисует её по-своему.
+  const sameList = (left, right) =>
+    left.length === right.length && left.every((item, i) => item === right[i]);
+
+  // Вернулась ли структура к исходной. Сравниваем семантику блоков, а не
+  // innerHTML: редактор вправе нормализовать разметку, но не вправе оставить
+  // лишнюю ссылку, строку или изменённый тип макета.
   const sameStructure = (before, now) =>
-    lost(before.headings, now.headings).length === 0 &&
-    lost(before.embedded, now.embedded).length === 0 &&
-    now.grids === before.grids;
+    sameList(before.headings, now.headings) &&
+    sameList(before.embedded, now.embedded) &&
+    sameList(before.gridStructures, now.gridStructures) &&
+    sameList(before.blocks, now.blocks);
 
   // Откат неудачной вставки: редактор помнит историю, поэтому жмём Ctrl+Z,
   // пока разметка не совпадёт с исходной.
@@ -893,15 +899,7 @@ async function kmsStep(step, payload) {
               insertedGrid(canvas, expected.embedded[0], knownGrids)
             );
 
-        // Порядок правим переносом узла, поэтому разметку после него
-        // сверяем ещё раз: перенос тоже не должен ничего задеть.
-        const afterMove =
-          place && place.ok && place.moved
-            ? damageReport(before, structureSnapshot(canvas), expected)
-            : '';
-
-        const problem =
-          damage || (place && !place.ok ? place.reason : '') || afterMove;
+        const problem = damage || (place && !place.ok ? place.reason : '');
 
         if (problem) {
           const restored = await undoTo(canvas, before);
@@ -944,25 +942,40 @@ async function kmsStep(step, payload) {
 
         const before = structureSnapshot(canvas);
         const url = clean(payload.url);
+        const target = canonicalHref(url);
 
-        // Строки со ссылкой, которые были на полотне до вставки: ту же
-        // страницу могли добавить и раньше.
-        const knownLines = new Set(
-          [...canvas.children].filter((b) => clean(b.textContent).includes(url))
-        );
-
-        // Строка со вставленной ссылкой. Ищем среди блоков верхнего уровня:
-        // вставка могла уехать и в соседний раздел, это тоже надо увидеть.
-        const findLine = () => {
-          const lines = [...canvas.children].filter((b) =>
-            clean(b.textContent).includes(url)
+        const lineTargetsUrl = (line) => {
+          const byHref = [...line.querySelectorAll('a[href]')].some(
+            (a) => canonicalHref(a.getAttribute('href') || a.href) === target
           );
-          return lines.find((b) => !knownLines.has(b)) || lines.pop() || null;
+          if (byHref) return true;
+
+          // До автопревращения в <a> ссылка некоторое время остаётся текстом.
+          // Невидимые символы редактора не должны мешать её обнаружению.
+          const text = clean(line.textContent).replace(
+            /[\u200b-\u200d\ufeff]/g,
+            ''
+          );
+          return text.includes(url.replace(/[\u200b-\u200d\ufeff]/g, ''));
         };
 
-        // Переносить можно только строку, в которой нет ничего, кроме самой
-        // ссылки: иначе перенос утащил бы за собой чужой текст.
-        const onlyLink = (line) => clean(line.textContent) === url;
+        const targetLines = () =>
+          [...canvas.children].filter((line) => lineTargetsUrl(line));
+        const beforeTargetLines = targetLines().length;
+
+        // Строка со вставленной ссылкой. Ищем среди блоков верхнего уровня:
+        // href надёжнее textContent — KMS может визуально заменить адрес на
+        // карточку или подпись. Если такая ссылка уже была, новая всё равно
+        // должна стать последней строкой выбранного раздела.
+        const findLine = () => {
+          const currentHeading = [...canvas.querySelectorAll('h2')][
+            payload.headingIndex
+          ];
+          const inSection = currentHeading
+            ? sectionBlocks(canvas, currentHeading).filter(lineTargetsUrl)
+            : [];
+          return inSection[inSection.length - 1] || targetLines().pop() || null;
+        };
 
         // Ссылку ставим сразу за последней непустой строкой раздела. Точку
         // вставки готовим так же, как для макета: встать в конец макета
@@ -973,6 +986,18 @@ async function kmsStep(step, payload) {
         await pasteInto(canvas, payload.url, null);
         await sleep(300);
 
+        // Автоссылка и её DOM-обёртка появляются асинхронно. Ждём не более
+        // трёх секунд, чтобы не объявить успешную вставку ошибкой и не
+        // запустить повтор, который создаст дубль.
+        const detectStarted = Date.now();
+        while (
+          targetLines().length <= beforeTargetLines &&
+          Date.now() - detectStarted < 3000
+        ) {
+          await sleep(150);
+        }
+        const linkAppeared = targetLines().length > beforeTargetLines;
+
         const damage = damageReport(before, structureSnapshot(canvas), {
           grids: 0,
           embedded: [],
@@ -981,25 +1006,14 @@ async function kmsStep(step, payload) {
         // Место вставки проверяем так же, как для макета: редактор
         // перечитывает правку по-своему и может поставить ссылку в начало
         // раздела.
-        const place = damage
+        const place = damage || !linkAppeared
           ? null
-          : await placeAtSectionEnd(
-              canvas,
-              payload.headingIndex,
-              findLine,
-              onlyLink
-            );
-
-        const afterMove =
-          place && place.ok && place.moved
-            ? damageReport(before, structureSnapshot(canvas), {
-                grids: 0,
-                embedded: [],
-              })
-            : '';
+          : placeAtSectionEnd(canvas, payload.headingIndex, findLine);
 
         const problem =
-          damage || (place && !place.ok ? place.reason : '') || afterMove;
+          damage ||
+          (!linkAppeared ? 'вставленную ссылку не нашёл на полотне' : '') ||
+          (place && !place.ok ? place.reason : '');
 
         if (problem) {
           const restored = await undoTo(canvas, before);
