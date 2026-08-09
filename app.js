@@ -1052,7 +1052,15 @@ async function phaseAddLayout() {
       spaceId: state.created.spaceId,
     }),
   });
-  log(`Макет добавлен в конец раздела: ${added.where}.`);
+  log(
+    `Макет добавлен в конец раздела: ${added.where}; ` +
+      `в разделе он ${added.position}` +
+      (added.moved
+        ? added.wrong
+          ? ` (редактор поставил его ${added.wrong} — перенёс в конец).`
+          : ' (перенёс в конец раздела).'
+        : '.')
+  );
 
   await publishExistingPage(tab.id, noteNotificationAdded(state.meta.title));
   log('Страница пакета опубликована.');
