@@ -1123,10 +1123,10 @@ async function kmsStep(step, payload) {
           return fresh.filter(lineTargetsUrl).pop() || null;
         };
 
-        // Ссылку ставим сразу за последней непустой строкой раздела. Точку
-        // вставки готовим так же, как для макета: встать в конец макета
-        // нельзя — курсор уедет в следующий заголовок.
-        const where = await insertionPoint(canvas, payload.headingIndex, true);
+        // Если раздел уже заканчивается пустой строкой, вставляем ссылку прямо
+        // в неё. Иначе создаём следующую строку обычным Enter. После вставки
+        // ensureBlankLineAfter гарантирует новую пустую строку уже за ссылкой.
+        const where = await insertionPoint(canvas, payload.headingIndex);
 
         // Ссылку вставляем обычным текстом: редактор сам превращает её в ссылку
         await pasteInto(canvas, payload.url, null);
