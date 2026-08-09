@@ -241,18 +241,40 @@ async function kmsStep(step, payload) {
   const isTextBlock = (el) =>
     Boolean(el) && TEXT_BLOCK_TAGS.test(el.tagName) && !isStructural(el);
 
+  // Блоки раздела: всё между заголовком и следующим заголовком первого или
+  // второго уровня. Сам заголовок в список не входит.
+  function sectionBlocks(canvas, heading) {
+    const start = topLevelOf(canvas, heading);
+    const blocks = [];
+    let node = start ? start.nextElementSibling : null;
+
+    while (node) {
+      if (/^H[12]$/.test(node.tagName)) break;
+      blocks.push(node);
+      node = node.nextElementSibling;
+    }
+    return blocks;
+  }
+
+  // Макеты раздела в порядке следования на полотне
+  function sectionGrids(canvas, heading) {
+    const grids = [];
+    for (const block of sectionBlocks(canvas, heading)) {
+      if (block.matches && block.matches('.m-grid')) grids.push(block);
+      else grids.push(...block.querySelectorAll('.m-grid'));
+    }
+    return grids;
+  }
+
   // Последняя обычная строка раздела: запасная точка вставки, если завести
   // пустую строку в самом конце раздела не удалось. Сам заголовок тоже
   // годится — в пустом разделе других строк просто нет.
   function lastTextBlockOf(canvas, heading) {
     const start = topLevelOf(canvas, heading);
     let found = isTextBlock(start) ? start : null;
-    let node = start ? start.nextElementSibling : null;
 
-    while (node) {
-      if (/^H[12]$/.test(node.tagName)) break;
+    for (const node of sectionBlocks(canvas, heading)) {
       if (isTextBlock(node)) found = node;
-      node = node.nextElementSibling;
     }
     return found;
   }
@@ -368,6 +390,155 @@ async function kmsStep(step, payload) {
     await pressEnter(canvas);
     await sleep(150);
     return 'новая строка перед макетами раздела (в самый конец встать не удалось)';
+  }
+
+  // Макет, который только что вставили. Ищем по ссылке на созданную
+  // страницу: редактор перерисовывает разметку и подменяет узлы своими,
+  // поэтому запоминать сам элемент бесполезно. Если ссылки нет — берём
+  // макет, которого раньше на полотне не было.
+  function insertedGrid(canvas, articleId, known) {
+    if (articleId) {
+      const selector = `.m-embedded[data-article-id="${articleId}"]`;
+      const grids = [...canvas.querySelectorAll(selector)]
+        .map((e) => e.closest('.m-grid'))
+        .filter(Boolean);
+
+      // Ту же страницу могли встроить в раздел и раньше: берём макет,
+      // которого до вставки не было.
+      const fresh = grids.find((g) => !known.has(g));
+      if (fresh || grids.length) return fresh || grids[grids.length - 1];
+    }
+    return (
+      [...canvas.querySelectorAll('.m-grid')].find((g) => !known.has(g)) || null
+    );
+  }
+
+  // Блок, после которого должен встать макет: последний непустой блок
+  // раздела, не считая самого вставленного макета. Пустые строки в хвосте
+  // раздела оставляем последними — их держат вручную, чтобы редактору было
+  // куда ставить курсор.
+  function layoutAnchor(canvas, heading, grid) {
+    let anchor = topLevelOf(canvas, heading);
+
+    // Текст блока без макетов: по нему видно, есть ли в блоке что-то,
+    // кроме самого вставленного макета.
+    const textBesideGrids = (block) => {
+      const copy = block.cloneNode(true);
+      copy.querySelectorAll('.m-grid').forEach((g) => g.remove());
+      return clean(copy.textContent);
+    };
+
+    const hasOtherGrid = (block) =>
+      [...block.querySelectorAll('.m-grid')].some((g) => g !== grid);
+
+    for (const block of sectionBlocks(canvas, heading)) {
+      // Сам вставленный макет точкой отсчёта быть не может
+      if (block === grid) continue;
+
+      // Блок, внутрь которого попал макет: пропускаем, если ничего
+      // другого в нём нет.
+      if (
+        block.contains(grid) &&
+        !textBesideGrids(block) &&
+        !hasOtherGrid(block)
+      ) {
+        continue;
+      }
+
+      // Пустые строки в хвосте раздела не отодвигают макет
+      if (isTextBlock(block) && !clean(block.textContent)) continue;
+
+      anchor = block;
+    }
+    return anchor;
+  }
+
+  // Проверка порядка: новый макет должен стоять последним в наборе макетов
+  // раздела. Редактор вставку через insertHTML сам не выполняет — он лишь
+  // замечает правку разметки и перечитывает изменённый кусок, сверяя его со
+  // своим документом. Когда в разделе подряд идут похожие макеты, такое
+  // сличение неоднозначно, и редактор нередко решает, что новый макет
+  // появился перед прежними. Пустая строка в конце раздела тут не помогает:
+  // курсор стоит правильно, порядок выбирает редактор. Поэтому проверяем
+  // результат и при необходимости переносим узел в конец раздела сами.
+  async function placeAtSectionEnd(canvas, headingIndex, articleId, known) {
+    const findHeading = () => [...canvas.querySelectorAll('h2')][headingIndex];
+
+    const look = () => {
+      const heading = findHeading();
+      const grid = insertedGrid(canvas, articleId, known);
+      const grids = heading ? sectionGrids(canvas, heading) : [];
+      return {
+        heading,
+        grid,
+        at: grid ? grids.indexOf(grid) : -1,
+        total: grids.length,
+      };
+    };
+
+    // Главное требование: макет идёт после всех прежних макетов раздела.
+    const lastGrid = (s) =>
+      Boolean(s.grid) && s.at === s.total - 1 && s.grid.parentElement === canvas;
+
+    // Желаемое место: сразу за последним непустым блоком раздела, чтобы
+    // пустая строка осталась в самом конце — по ней встаёт курсор в
+    // следующий раз.
+    const atAnchor = (s) =>
+      lastGrid(s) &&
+      s.grid.previousElementSibling ===
+        layoutAnchor(canvas, findHeading(), s.grid);
+
+    const fail = (reason) => ({ ok: false, reason });
+
+    let state = look();
+    if (!state.heading) return fail('раздел не найден на полотне');
+    if (!state.grid) return fail('вставленный макет не найден на полотне');
+    if (state.at === -1) {
+      return fail('вставленный макет оказался вне выбранного раздела');
+    }
+
+    const wrong = lastGrid(state) ? '' : `${state.at + 1}-й из ${state.total}`;
+    let moved = false;
+
+    // Переносим макет в конец раздела. Правку разметки редактор
+    // перечитывает целиком по изменённому куску, поэтому порядок после
+    // переноса однозначен. Повторяем один раз: раздел он может перерисовать
+    // уже после нашей правки.
+    for (let attempt = 0; attempt < 2 && !atAnchor(state); attempt += 1) {
+      const anchor = layoutAnchor(canvas, findHeading(), state.grid);
+      if (!anchor) break;
+      anchor.insertAdjacentElement('afterend', state.grid);
+      moved = true;
+      await sleep(500);
+
+      state = look();
+      if (!state.grid) return fail('после переноса макет пропал с полотна');
+    }
+
+    // Даём редактору дорисовать раздел и сверяем порядок ещё раз: правку
+    // разметки он может и откатить.
+    if (moved) {
+      await sleep(500);
+      state = look();
+      if (!state.grid) return fail('после переноса макет пропал с полотна');
+    }
+
+    // Не добившись места сразу за последней строкой, миримся с этим: важно,
+    // что макет стоит после прежних. А вот неверный порядок — ошибка.
+    if (!lastGrid(state)) {
+      return fail(
+        `макет встал ${wrong || `${state.at + 1}-м из ${state.total}`} и ` +
+          `остался ${state.at + 1}-м из ${state.total} после переноса — ` +
+          'редактор не принял порядок'
+      );
+    }
+
+    return {
+      ok: true,
+      moved,
+      position: `${state.at + 1}-й из ${state.total}`,
+      wrong,
+    };
   }
 
   // Слепок структуры полотна: по нему сверяем, что вставка ничего не съела.
@@ -659,6 +830,7 @@ async function kmsStep(step, payload) {
 
         const before = structureSnapshot(canvas);
         const expected = expectedFromHtml(payload.html);
+        const knownGrids = new Set(canvas.querySelectorAll('.m-grid'));
 
         const where = await insertionPoint(canvas, payload.headingIndex);
 
@@ -673,13 +845,32 @@ async function kmsStep(step, payload) {
         }
         await sleep(300);
 
-        // Проверяем, что вставка ничего не сломала: заголовки на месте,
-        // прежние макеты целы, новый — добавился.
+        // Разбор последствий вставки: заголовки на месте, прежние макеты
+        // целы, новый добавился — и стоит последним в разделе.
         const damage = damageReport(before, structureSnapshot(canvas), expected);
-        if (damage) {
+        const place = damage
+          ? null
+          : await placeAtSectionEnd(
+              canvas,
+              payload.headingIndex,
+              expected.embedded[0],
+              knownGrids
+            );
+
+        // Порядок правим переносом узла, поэтому разметку после него
+        // сверяем ещё раз: перенос тоже не должен ничего задеть.
+        const afterMove =
+          place && place.ok && place.moved
+            ? damageReport(before, structureSnapshot(canvas), expected)
+            : '';
+
+        const problem =
+          damage || (place && !place.ok ? place.reason : '') || afterMove;
+
+        if (problem) {
           const restored = await undoTo(canvas, before);
           throw new Error(
-            `${damage}. ` +
+            `${problem}. ` +
               (restored
                 ? 'Вставка отменена, страница осталась прежней.'
                 : 'Отменить вставку не удалось — проверьте страницу вручную ' +
@@ -687,7 +878,16 @@ async function kmsStep(step, payload) {
           );
         }
 
-        return { ok: true, result: { done: true, where } };
+        return {
+          ok: true,
+          result: {
+            done: true,
+            where,
+            position: place.position,
+            moved: Boolean(place.moved),
+            wrong: place.wrong || '',
+          },
+        };
       }
 
       case 'insert-link': {
