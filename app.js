@@ -1076,7 +1076,9 @@ async function phaseAddLayout() {
           ? ` (редактор поставил его на место ${added.wrong} среди блоков ` +
             'раздела — перенёс в конец).'
           : ' (перенёс в конец раздела).'
-        : '.')
+        : '.') +
+      ` После макета ${added.blankCreated ? 'добавлена' : 'уже была'} ` +
+      'пустая строка.'
   );
 
   await publishExistingPage(tab.id, noteNotificationAdded(state.meta.title));
@@ -1118,7 +1120,9 @@ async function phaseAddLink() {
         ? added.wrong
           ? ` (редактор поставил её на место ${added.wrong} — перенёс в конец).`
           : ' (перенёс в конец раздела).'
-        : '.')
+        : '.') +
+      ` После ссылки ${added.blankCreated ? 'добавлена' : 'уже была'} ` +
+      'пустая строка.'
   );
 
   await publishExistingPage(tab.id, noteNotificationAdded(state.meta.title));
