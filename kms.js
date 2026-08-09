@@ -46,9 +46,22 @@ async function kmsStep(step, payload) {
       .toLowerCase()
       .replace(/ё/g, 'е');
 
-  const wizardRoot = () =>
-    document.querySelector('.popup__container .wizard-wrapper') ||
-    document.querySelector('.popup__container');
+  // Окно мастера публикации. Пустая оболочка .popup__container остаётся в
+  // разметке и после того, как мастер закрылся, поэтому за открытое окно её
+  // не считаем: иначе ожидание кнопки «Завершить» не кончится никогда, хотя
+  // страница давно сохранена.
+  const wizardRoot = () => {
+    const wrapper = document.querySelector('.popup__container .wizard-wrapper');
+    if (wrapper && isVisible(wrapper)) return wrapper;
+
+    const popup = document.querySelector('.popup__container');
+    const alive =
+      popup &&
+      isVisible(popup) &&
+      [...popup.querySelectorAll('button, textarea, input')].some(isVisible);
+
+    return alive ? popup : null;
+  };
 
   const isVisible = (el) =>
     Boolean(
@@ -343,6 +356,17 @@ async function kmsStep(step, payload) {
     const end = sectionEnd(canvas, heading, skipEmpty);
     if (!end) throw new Error('не удалось определить конец раздела');
 
+    // Короткое описание блока для журнала: по нему видно, куда именно
+    // встал курсор, если вставка потом окажется не на месте.
+    const shortText = (el) => {
+      const text = blockText(el);
+      if (!text) return 'пустая строка';
+      return `«${text.length > 40 ? `${text.slice(0, 40)}…` : text}»`;
+    };
+
+    const heads = (el) =>
+      el === topLevelOf(canvas, heading) ? ' (заголовок раздела)' : '';
+
     // Пустая строка в конце раздела уже есть — просто встаём в неё
     if (isTextBlock(end) && !clean(end.textContent)) {
       caretAtEnd(canvas, end);
@@ -356,7 +380,7 @@ async function kmsStep(step, payload) {
       await sleep(150);
       await pressEnter(canvas);
       await sleep(150);
-      return 'новая строка после последней строки раздела';
+      return `новая строка после ${shortText(end)}${heads(end)}`;
     }
 
     // Раздел заканчивается макетом или таблицей: заводим пустую строку сами
@@ -389,7 +413,10 @@ async function kmsStep(step, payload) {
     await sleep(150);
     await pressEnter(canvas);
     await sleep(150);
-    return 'новая строка перед макетами раздела (в самый конец встать не удалось)';
+    return (
+      `новая строка после ${shortText(fallback)}${heads(fallback)} ` +
+      '(в самый конец раздела встать не удалось)'
+    );
   }
 
   // Макет, который только что вставили. Ищем по ссылке на созданную
@@ -413,39 +440,40 @@ async function kmsStep(step, payload) {
     );
   }
 
-  // Блок, после которого должен встать макет: последний непустой блок
-  // раздела, не считая самого вставленного макета. Пустые строки в хвосте
-  // раздела оставляем последними — их держат вручную, чтобы редактору было
-  // куда ставить курсор.
-  function layoutAnchor(canvas, heading, grid) {
-    let anchor = topLevelOf(canvas, heading);
+  // Текст блока без указанного узла: по нему видно, есть ли в блоке что-то,
+  // кроме самой вставки.
+  function textBeside(block, node) {
+    if (block === node) return '';
+    let text = '';
 
-    // Текст блока без макетов: по нему видно, есть ли в блоке что-то,
-    // кроме самого вставленного макета.
-    const textBesideGrids = (block) => {
-      const copy = block.cloneNode(true);
-      copy.querySelectorAll('.m-grid').forEach((g) => g.remove());
-      return clean(copy.textContent);
+    const walk = (el) => {
+      for (const child of el.childNodes) {
+        if (child === node) continue;
+        if (child.nodeType === 3) text += child.textContent;
+        else if (child.nodeType === 1) walk(child);
+      }
     };
 
-    const hasOtherGrid = (block) =>
-      [...block.querySelectorAll('.m-grid')].some((g) => g !== grid);
+    walk(block);
+    return clean(text);
+  }
+
+  // Блок, после которого должна встать вставка: последний непустой блок
+  // раздела, не считая её самой. Пустые строки в хвосте раздела оставляем
+  // последними — их держат вручную, чтобы редактору было куда ставить
+  // курсор в следующий раз.
+  function endAnchor(canvas, heading, node) {
+    let anchor = topLevelOf(canvas, heading);
 
     for (const block of sectionBlocks(canvas, heading)) {
-      // Сам вставленный макет точкой отсчёта быть не может
-      if (block === grid) continue;
+      // Сама вставка точкой отсчёта быть не может
+      if (block === node) continue;
 
-      // Блок, внутрь которого попал макет: пропускаем, если ничего
+      // Блок, внутрь которого попала вставка: пропускаем, если ничего
       // другого в нём нет.
-      if (
-        block.contains(grid) &&
-        !textBesideGrids(block) &&
-        !hasOtherGrid(block)
-      ) {
-        continue;
-      }
+      if (block.contains(node) && !textBeside(block, node)) continue;
 
-      // Пустые строки в хвосте раздела не отодвигают макет
+      // Пустые строки в хвосте раздела вставку не отодвигают
       if (isTextBlock(block) && !clean(block.textContent)) continue;
 
       anchor = block;
@@ -453,92 +481,103 @@ async function kmsStep(step, payload) {
     return anchor;
   }
 
-  // Проверка порядка: новый макет должен стоять последним в наборе макетов
-  // раздела. Редактор вставку через insertHTML сам не выполняет — он лишь
-  // замечает правку разметки и перечитывает изменённый кусок, сверяя его со
-  // своим документом. Когда в разделе подряд идут похожие макеты, такое
-  // сличение неоднозначно, и редактор нередко решает, что новый макет
-  // появился перед прежними. Пустая строка в конце раздела тут не помогает:
-  // курсор стоит правильно, порядок выбирает редактор. Поэтому проверяем
+  // Проверка места: вставка должна оказаться в конце раздела — после всего,
+  // что там было. Редактор ни insertHTML, ни синтетическую вставку сам не
+  // выполняет: он замечает правку разметки и перечитывает изменённый кусок,
+  // сверяя его со своим документом. Когда в разделе идут подряд похожие
+  // блоки, сличение неоднозначно, и редактор нередко решает, что новое
+  // появилось перед прежним. Пустая строка в конце раздела тут не помогает:
+  // курсор стоит правильно, место выбирает редактор. Поэтому проверяем
   // результат и при необходимости переносим узел в конец раздела сами.
-  async function placeAtSectionEnd(canvas, headingIndex, articleId, known) {
+  //
+  // find     — где искать вставку на полотне (узлы редактор подменяет
+  //            своими, поэтому ищем заново после каждой правки);
+  // movable  — можно ли переносить найденный узел, не потянув за собой
+  //            чужой текст.
+  async function placeAtSectionEnd(canvas, headingIndex, find, movable) {
     const findHeading = () => [...canvas.querySelectorAll('h2')][headingIndex];
+    const fail = (reason) => ({ ok: false, reason });
+    const canMove = movable || (() => true);
 
     const look = () => {
       const heading = findHeading();
-      const grid = insertedGrid(canvas, articleId, known);
-      const grids = heading ? sectionGrids(canvas, heading) : [];
-      return {
-        heading,
-        grid,
-        at: grid ? grids.indexOf(grid) : -1,
-        total: grids.length,
-      };
+      const node = find();
+      const blocks = heading ? sectionBlocks(canvas, heading) : [];
+      const holder = node
+        ? blocks.find((b) => b === node || b.contains(node))
+        : null;
+      return { heading, node, blocks, holder };
     };
 
-    // Главное требование: макет идёт после всех прежних макетов раздела.
-    const lastGrid = (s) =>
-      Boolean(s.grid) && s.at === s.total - 1 && s.grid.parentElement === canvas;
+    // Достаточное условие: после вставки в разделе остались одни пустые
+    // строки.
+    const atEnd = (s) =>
+      Boolean(s.holder) &&
+      s.blocks
+        .slice(s.blocks.indexOf(s.holder) + 1)
+        .every((b) => isTextBlock(b) && !clean(b.textContent));
 
-    // Желаемое место: сразу за последним непустым блоком раздела, чтобы
-    // пустая строка осталась в самом конце — по ней встаёт курсор в
-    // следующий раз.
-    const atAnchor = (s) =>
-      lastGrid(s) &&
-      s.grid.previousElementSibling ===
-        layoutAnchor(canvas, findHeading(), s.grid);
-
-    const fail = (reason) => ({ ok: false, reason });
+    // Желаемое: вставка стоит сразу за последним непустым блоком раздела,
+    // а пустые строки остаются в самом конце.
+    const tidy = (s) =>
+      atEnd(s) &&
+      s.node.parentElement === canvas &&
+      s.node.previousElementSibling === endAnchor(canvas, s.heading, s.node);
 
     let state = look();
     if (!state.heading) return fail('раздел не найден на полотне');
-    if (!state.grid) return fail('вставленный макет не найден на полотне');
-    if (state.at === -1) {
-      return fail('вставленный макет оказался вне выбранного раздела');
-    }
+    if (!state.node) return fail('вставку не нашёл на полотне');
+    if (!state.holder) return fail('вставка оказалась вне выбранного раздела');
 
-    const wrong = lastGrid(state) ? '' : `${state.at + 1}-й из ${state.total}`;
+    // Место в разделе: «3 из 5» — третий блок из пяти
+    const place = (s) =>
+      `${s.blocks.indexOf(s.holder) + 1} из ${s.blocks.length}`;
+    const wrong = atEnd(state) ? '' : place(state);
     let moved = false;
 
-    // Переносим макет в конец раздела. Правку разметки редактор
-    // перечитывает целиком по изменённому куску, поэтому порядок после
-    // переноса однозначен. Повторяем один раз: раздел он может перерисовать
+    // Переносим вставку в конец раздела. Правку разметки редактор
+    // перечитывает целиком по изменённому куску, поэтому место после
+    // переноса однозначно. Повторяем один раз: раздел он может перерисовать
     // уже после нашей правки.
-    for (let attempt = 0; attempt < 2 && !atAnchor(state); attempt += 1) {
-      const anchor = layoutAnchor(canvas, findHeading(), state.grid);
-      if (!anchor) break;
-      anchor.insertAdjacentElement('afterend', state.grid);
+    for (
+      let attempt = 0;
+      attempt < 2 && !tidy(state) && canMove(state.node);
+      attempt += 1
+    ) {
+      const anchor = endAnchor(canvas, findHeading(), state.node);
+      if (!anchor || anchor === state.node) break;
+      anchor.insertAdjacentElement('afterend', state.node);
       moved = true;
       await sleep(500);
 
       state = look();
-      if (!state.grid) return fail('после переноса макет пропал с полотна');
+      if (!state.node) return fail('после переноса вставка пропала с полотна');
+      if (!state.holder) return fail('после переноса вставка ушла из раздела');
     }
 
-    // Даём редактору дорисовать раздел и сверяем порядок ещё раз: правку
+    // Даём редактору дорисовать раздел и сверяем место ещё раз: правку
     // разметки он может и откатить.
     if (moved) {
       await sleep(500);
       state = look();
-      if (!state.grid) return fail('после переноса макет пропал с полотна');
+      if (!state.node) return fail('после переноса вставка пропала с полотна');
+      if (!state.holder) return fail('после переноса вставка ушла из раздела');
     }
 
     // Не добившись места сразу за последней строкой, миримся с этим: важно,
-    // что макет стоит после прежних. А вот неверный порядок — ошибка.
-    if (!lastGrid(state)) {
+    // что вставка идёт после прежнего содержимого раздела.
+    if (!atEnd(state)) {
       return fail(
-        `макет встал ${wrong || `${state.at + 1}-м из ${state.total}`} и ` +
-          `остался ${state.at + 1}-м из ${state.total} после переноса — ` +
-          'редактор не принял порядок'
+        `вставка встала на место ${wrong} среди блоков раздела и осталась ` +
+          `${place(state)} ` +
+          (moved
+            ? 'после переноса — редактор не принял порядок'
+            : 'после вставки — переносить её нельзя, не потянув за собой ' +
+              'чужой текст')
       );
     }
 
-    return {
-      ok: true,
-      moved,
-      position: `${state.at + 1}-й из ${state.total}`,
-      wrong,
-    };
+    return { ok: true, moved, position: place(state), wrong };
   }
 
   // Слепок структуры полотна: по нему сверяем, что вставка ничего не съела.
@@ -850,11 +889,8 @@ async function kmsStep(step, payload) {
         const damage = damageReport(before, structureSnapshot(canvas), expected);
         const place = damage
           ? null
-          : await placeAtSectionEnd(
-              canvas,
-              payload.headingIndex,
-              expected.embedded[0],
-              knownGrids
+          : await placeAtSectionEnd(canvas, payload.headingIndex, () =>
+              insertedGrid(canvas, expected.embedded[0], knownGrids)
             );
 
         // Порядок правим переносом узла, поэтому разметку после него
@@ -862,6 +898,104 @@ async function kmsStep(step, payload) {
         const afterMove =
           place && place.ok && place.moved
             ? damageReport(before, structureSnapshot(canvas), expected)
+            : '';
+
+        const problem =
+          damage || (place && !place.ok ? place.reason : '') || afterMove;
+
+        if (problem) {
+          const restored = await undoTo(canvas, before);
+          throw new Error(
+            `${problem}. ` +
+              (restored
+                ? 'Вставка отменена, страница осталась прежней.'
+                : 'Отменить вставку не удалось — проверьте страницу вручную ' +
+                  'и не публикуйте её, пока разметка не в порядке.')
+          );
+        }
+
+        // Для журнала считаем макеты, а не все блоки раздела: пользователю
+        // важно, каким по счёту макетом встал новый.
+        const section = [...canvas.querySelectorAll('h2')][payload.headingIndex];
+        const grids = section ? sectionGrids(canvas, section) : [];
+        const grid = insertedGrid(canvas, expected.embedded[0], knownGrids);
+        const rank = grids.indexOf(grid);
+
+        return {
+          ok: true,
+          result: {
+            done: true,
+            where,
+            position:
+              rank === -1
+                ? place.position
+                : `${rank + 1}-й макет из ${grids.length}`,
+            moved: Boolean(place.moved),
+            wrong: place.wrong || '',
+          },
+        };
+      }
+
+      case 'insert-link': {
+        const canvas = await waitFor(findCanvas, 15000);
+        const headings = [...canvas.querySelectorAll('h2')];
+        const heading = headings[payload.headingIndex];
+        if (!heading) throw new Error('раздел не найден на полотне');
+
+        const before = structureSnapshot(canvas);
+        const url = clean(payload.url);
+
+        // Строки со ссылкой, которые были на полотне до вставки: ту же
+        // страницу могли добавить и раньше.
+        const knownLines = new Set(
+          [...canvas.children].filter((b) => clean(b.textContent).includes(url))
+        );
+
+        // Строка со вставленной ссылкой. Ищем среди блоков верхнего уровня:
+        // вставка могла уехать и в соседний раздел, это тоже надо увидеть.
+        const findLine = () => {
+          const lines = [...canvas.children].filter((b) =>
+            clean(b.textContent).includes(url)
+          );
+          return lines.find((b) => !knownLines.has(b)) || lines.pop() || null;
+        };
+
+        // Переносить можно только строку, в которой нет ничего, кроме самой
+        // ссылки: иначе перенос утащил бы за собой чужой текст.
+        const onlyLink = (line) => clean(line.textContent) === url;
+
+        // Ссылку ставим сразу за последней непустой строкой раздела. Точку
+        // вставки готовим так же, как для макета: встать в конец макета
+        // нельзя — курсор уедет в следующий заголовок.
+        const where = await insertionPoint(canvas, payload.headingIndex, true);
+
+        // Ссылку вставляем обычным текстом: редактор сам превращает её в ссылку
+        await pasteInto(canvas, payload.url, null);
+        await sleep(300);
+
+        const damage = damageReport(before, structureSnapshot(canvas), {
+          grids: 0,
+          embedded: [],
+        });
+
+        // Место вставки проверяем так же, как для макета: редактор
+        // перечитывает правку по-своему и может поставить ссылку в начало
+        // раздела.
+        const place = damage
+          ? null
+          : await placeAtSectionEnd(
+              canvas,
+              payload.headingIndex,
+              findLine,
+              onlyLink
+            );
+
+        const afterMove =
+          place && place.ok && place.moved
+            ? damageReport(before, structureSnapshot(canvas), {
+                grids: 0,
+                embedded: [],
+              })
             : '';
 
         const problem =
@@ -888,41 +1022,6 @@ async function kmsStep(step, payload) {
             wrong: place.wrong || '',
           },
         };
-      }
-
-      case 'insert-link': {
-        const canvas = await waitFor(findCanvas, 15000);
-        const headings = [...canvas.querySelectorAll('h2')];
-        const heading = headings[payload.headingIndex];
-        if (!heading) throw new Error('раздел не найден на полотне');
-
-        const before = structureSnapshot(canvas);
-
-        // Ссылку ставим сразу за последней непустой строкой раздела. Точку
-        // вставки готовим так же, как для макета: встать в конец макета
-        // нельзя — курсор уедет в следующий заголовок.
-        const where = await insertionPoint(canvas, payload.headingIndex, true);
-
-        // Ссылку вставляем обычным текстом: редактор сам превращает её в ссылку
-        await pasteInto(canvas, payload.url, null);
-        await sleep(300);
-
-        const damage = damageReport(before, structureSnapshot(canvas), {
-          grids: 0,
-          embedded: [],
-        });
-        if (damage) {
-          const restored = await undoTo(canvas, before);
-          throw new Error(
-            `${damage}. ` +
-              (restored
-                ? 'Вставка отменена, страница осталась прежней.'
-                : 'Отменить вставку не удалось — проверьте страницу вручную ' +
-                  'и не публикуйте её, пока разметка не в порядке.')
-          );
-        }
-
-        return { ok: true, result: { done: true, where } };
       }
 
       // ---------------------------------------------------------------- фаза 5
@@ -1067,7 +1166,14 @@ async function kmsStep(step, payload) {
       // Снимок состояния мастера без единого действия. Панель опрашивает
       // его, пока кнопка «Завершить» неактивна, и пишет об этом в журнал.
       case 'wizard-state': {
-        if (!wizardRoot()) return { ok: true, result: { open: false } };
+        // Окно редактора статьи закрывается, когда страница сохранена: это
+        // признак завершённой публикации, даже если от мастера осталась
+        // оболочка.
+        const editing = Boolean(findCanvas());
+
+        if (!wizardRoot()) {
+          return { ok: true, result: { open: false, editor: editing } };
+        }
 
         const finish = wizardButton('Завершить') || soleFinalAction();
         const next = wizardButton('Продолжить');
@@ -1077,6 +1183,7 @@ async function kmsStep(step, payload) {
           ok: true,
           result: {
             open: true,
+            editor: editing,
             finish: finish
               ? {
                   label: clean(finish.textContent),
@@ -1162,11 +1269,10 @@ async function kmsStep(step, payload) {
       }
 
       case 'wizard-closed': {
+        // Закрытое окно редактора статьи считаем таким же признаком конца,
+        // как и закрытый мастер: страница уже сохранена.
         await waitFor(
-          () =>
-            !document.querySelector('.popup__container .wizard-wrapper')
-              ? true
-              : null,
+          () => (!wizardRoot() || !findCanvas() ? true : null),
           90000
         );
         return { ok: true, result: { done: true } };
