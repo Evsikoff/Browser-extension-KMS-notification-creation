@@ -655,6 +655,7 @@ async function waitForFinishButton(tabId, note, seconds) {
   let lastLogAt = 0;
   let checks = 0;
   let repairs = 0;
+  let closedEditor = 0; // подряд идущие проверки без окна редактора
 
   ui.timer.hidden = false;
   const tick = setInterval(() => {
@@ -672,15 +673,30 @@ async function waitForFinishButton(tabId, note, seconds) {
       // Кнопка активна — либо мастер стоит на промежуточном шаге, дальше
       // его проведёт сам шаг завершения.
       if (state.finish && !state.finish.disabled) {
-        if (checks > 1) {
-          log(
-            `Кнопка «${state.finish.label}» стала активной через ` +
-              `${fmtTime(elapsed())} (проверок: ${checks}).`
-          );
-        }
+        log(
+          (checks > 1
+            ? `Кнопка «${state.finish.label}» стала активной через ` +
+              `${fmtTime(elapsed())} (проверок: ${checks}). `
+            : `Кнопка «${state.finish.label}» активна. `) +
+            'Теперь Naumen KMS требуется какое-то время, чтобы осознать её ' +
+            'нажатие.'
+        );
         return 'ready';
       }
       if (!state.finish && state.next && !state.next.disabled) return 'ready';
+
+      // Нажимать нечего. Значит, стоит проверить, не сохранилась ли страница
+      // сама: от закрытого мастера остаётся пустая оболочка окна, и по ней
+      // ожидание кнопки может длиться бесконечно. Окно редактора статьи при
+      // сохранении закрывается — это и есть признак конца работы.
+      closedEditor = state.editor ? 0 : closedEditor + 1;
+      if (closedEditor >= 2) {
+        log(
+          'Окно редактора закрылось — страница сохранена, хотя мастер ' +
+            'публикации остался в разметке. Кнопку «Завершить» больше не жду.'
+        );
+        return 'closed';
+      }
 
       // Текст уведомления мог слететь при перерисовке — вписываем заново,
       // иначе кнопка не включится никогда. Больше трёх попыток не делаем:
@@ -1057,7 +1073,8 @@ async function phaseAddLayout() {
       `в разделе он ${added.position}` +
       (added.moved
         ? added.wrong
-          ? ` (редактор поставил его ${added.wrong} — перенёс в конец).`
+          ? ` (редактор поставил его на место ${added.wrong} среди блоков ` +
+            'раздела — перенёс в конец).'
           : ' (перенёс в конец раздела).'
         : '.')
   );
@@ -1094,7 +1111,15 @@ async function phaseAddLink() {
     headingIndex,
     url: state.created.url,
   });
-  log(`Ссылка добавлена в конец раздела: ${added.where}.`);
+  log(
+    `Ссылка добавлена в конец раздела: ${added.where}; ` +
+      `место среди блоков раздела: ${added.position}` +
+      (added.moved
+        ? added.wrong
+          ? ` (редактор поставил её на место ${added.wrong} — перенёс в конец).`
+          : ' (перенёс в конец раздела).'
+        : '.')
+  );
 
   await publishExistingPage(tab.id, noteNotificationAdded(state.meta.title));
   log('Головная страница опубликована.');
@@ -1213,10 +1238,14 @@ ui.copyUrl.addEventListener('click', async () => {
   await navigator.clipboard.writeText(ui.doneUrl.value);
 });
 
+// Ещё одно уведомление начинаем с фазы 2: структура головной страницы
+// изменилась — только что добавленную ссылку нужно перечитать, иначе в
+// фазе 3 будет виден вчерашний список тем.
 ui.another.addEventListener('click', () => {
   state.meta = null;
   state.created = null;
-  goToMeta();
+  showPhase('phase-2', 2);
+  runStructureCheck();
 });
 
 // ============================================================================
