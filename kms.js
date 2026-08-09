@@ -535,6 +535,20 @@ async function kmsStep(step, payload) {
     }
   }
 
+  // Идентификатор внутренней страницы из обычного KMS URL. При вставке такой
+  // адрес часто превращается не в <a>, а в виджет с data-article-id.
+  function wikiArticleId(value) {
+    try {
+      const url = new URL(String(value || ''), document.baseURI);
+      const pathId = url.pathname.match(/\/wiki\/(\d+)(?:\/|$)/);
+      const queryId = url.searchParams.get('articleId');
+      return (pathId && pathId[1]) || (/^\d+$/.test(queryId) ? queryId : '');
+    } catch (e) {
+      const match = String(value || '').match(/\/wiki\/(\d+)(?:[/?#]|$)/);
+      return match ? match[1] : '';
+    }
+  }
+
   // Стабильная часть типа макета. Служебные классы состояния не учитываем,
   // зато сохраняем классы самого grid и его колонок: именно здесь проявляется
   // баг, когда после DOM-переноса первый макет получает тип нового.
@@ -573,6 +587,47 @@ async function kmsStep(step, payload) {
     });
   }
 
+  // Форма блока с существенными DOM-атрибутами. Она нужна только для поиска
+  // нового блока после вставки: KMS может отрисовать внутреннюю ссылку не как
+  // <a href>, а как служебный виджет без текста. В таком случае семантический
+  // снимок выше намеренно слишком общий, а форма всё равно отличает виджет от
+  // пустого <p><br></p>.
+  function blockShape(block) {
+    const copy = block.cloneNode(true);
+    copy.querySelectorAll('a.m-anchor, .m-anchor').forEach((a) => a.remove());
+
+    for (const node of [copy, ...copy.querySelectorAll('*')]) {
+      for (const attribute of [...node.attributes]) {
+        const keep =
+          attribute.name === 'class' ||
+          attribute.name === 'href' ||
+          attribute.name === 'contenteditable' ||
+          attribute.name.startsWith('data-');
+        if (!keep) node.removeAttribute(attribute.name);
+      }
+      if (node.hasAttribute('class')) {
+        node.setAttribute('class', [...node.classList].sort().join(' '));
+      }
+    }
+
+    return copy.outerHTML.replace(/>\s+</g, '><').trim();
+  }
+
+  // Блоки, которых не было в снимке. Сравниваем как мультимножество, чтобы
+  // одинаковые прежние строки не мешали найти ещё одну такую же новую.
+  function freshTopLevelBlocks(canvas, beforeShapes) {
+    const rest = [...beforeShapes];
+    const fresh = [];
+
+    for (const block of canvas.children) {
+      const shape = blockShape(block);
+      const at = rest.indexOf(shape);
+      if (at === -1) fresh.push(block);
+      else rest.splice(at, 1);
+    }
+    return fresh;
+  }
+
   // Слепок структуры полотна: по нему сверяем, что вставка ничего не съела
   // и не изменила тип уже существующего макета.
   function structureSnapshot(canvas) {
@@ -587,6 +642,7 @@ async function kmsStep(step, payload) {
       grids: canvas.querySelectorAll('.m-grid').length,
       gridStructures: [...canvas.querySelectorAll('.m-grid')].map(gridStructure),
       blocks: [...canvas.children].map(blockStructure),
+      blockShapes: [...canvas.children].map(blockShape),
     };
   }
 
@@ -943,12 +999,31 @@ async function kmsStep(step, payload) {
         const before = structureSnapshot(canvas);
         const url = clean(payload.url);
         const target = canonicalHref(url);
+        const targetArticleId = wikiArticleId(url);
 
         const lineTargetsUrl = (line) => {
-          const byHref = [...line.querySelectorAll('a[href]')].some(
-            (a) => canonicalHref(a.getAttribute('href') || a.href) === target
+          const nodes = [line, ...line.querySelectorAll('*')];
+          const byHref = nodes.some(
+            (node) =>
+              node.hasAttribute('href') &&
+              canonicalHref(node.getAttribute('href')) === target
           );
           if (byHref) return true;
+
+          const byDataUrl = nodes.some(
+            (node) =>
+              node.hasAttribute('data-url') &&
+              canonicalHref(node.getAttribute('data-url')) === target
+          );
+          if (byDataUrl) return true;
+
+          const byArticleId =
+            targetArticleId &&
+            nodes.some(
+              (node) =>
+                node.getAttribute('data-article-id') === targetArticleId
+            );
+          if (byArticleId) return true;
 
           // До автопревращения в <a> ссылка некоторое время остаётся текстом.
           // Невидимые символы редактора не должны мешать её обнаружению.
@@ -959,22 +1034,12 @@ async function kmsStep(step, payload) {
           return text.includes(url.replace(/[\u200b-\u200d\ufeff]/g, ''));
         };
 
-        const targetLines = () =>
-          [...canvas.children].filter((line) => lineTargetsUrl(line));
-        const beforeTargetLines = targetLines().length;
-
-        // Строка со вставленной ссылкой. Ищем среди блоков верхнего уровня:
-        // href надёжнее textContent — KMS может визуально заменить адрес на
-        // карточку или подпись. Если такая ссылка уже была, новая всё равно
-        // должна стать последней строкой выбранного раздела.
+        // Строка со вставленной ссылкой. Ищем только среди фактически новых
+        // блоков: по тексту/href, data-url или data-article-id внутреннего
+        // виджета KMS. Так прежняя такая же ссылка не выдаётся за новую.
         const findLine = () => {
-          const currentHeading = [...canvas.querySelectorAll('h2')][
-            payload.headingIndex
-          ];
-          const inSection = currentHeading
-            ? sectionBlocks(canvas, currentHeading).filter(lineTargetsUrl)
-            : [];
-          return inSection[inSection.length - 1] || targetLines().pop() || null;
+          const fresh = freshTopLevelBlocks(canvas, before.blockShapes);
+          return fresh.filter(lineTargetsUrl).pop() || null;
         };
 
         // Ссылку ставим сразу за последней непустой строкой раздела. Точку
@@ -986,17 +1051,14 @@ async function kmsStep(step, payload) {
         await pasteInto(canvas, payload.url, null);
         await sleep(300);
 
-        // Автоссылка и её DOM-обёртка появляются асинхронно. Ждём не более
-        // трёх секунд, чтобы не объявить успешную вставку ошибкой и не
+        // Автоссылка или внутренний виджет появляются асинхронно. Ждём не
+        // более пяти секунд, чтобы не объявить успешную вставку ошибкой и не
         // запустить повтор, который создаст дубль.
         const detectStarted = Date.now();
-        while (
-          targetLines().length <= beforeTargetLines &&
-          Date.now() - detectStarted < 3000
-        ) {
+        while (!findLine() && Date.now() - detectStarted < 5000) {
           await sleep(150);
         }
-        const linkAppeared = targetLines().length > beforeTargetLines;
+        const linkAppeared = Boolean(findLine());
 
         const damage = damageReport(before, structureSnapshot(canvas), {
           grids: 0,
