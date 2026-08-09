@@ -523,6 +523,65 @@ async function kmsStep(step, payload) {
     return { ok: true, moved: false, position: place(state), wrong: '' };
   }
 
+  // После добавленного материала в выбранном разделе должна оставаться хотя
+  // бы одна пустая строка. Сначала создаём её штатным Enter в DOM-позиции
+  // после блока; прямое добавление <p> оставляем только резервом для версий
+  // редактора, которые такую позицию не обрабатывают.
+  async function ensureBlankLineAfter(canvas, headingIndex, find) {
+    const findHeading = () => [...canvas.querySelectorAll('h2')][headingIndex];
+    const fail = (reason) => ({ ok: false, reason });
+
+    const look = () => {
+      const heading = findHeading();
+      const node = find();
+      const blocks = heading ? sectionBlocks(canvas, heading) : [];
+      const holder = node
+        ? blocks.find((block) => block === node || block.contains(node))
+        : null;
+      const at = holder ? blocks.indexOf(holder) : -1;
+      return { heading, node, blocks, holder, next: blocks[at + 1] || null };
+    };
+
+    const blankAfter = (state) =>
+      Boolean(
+        state.holder &&
+          state.next &&
+          isTextBlock(state.next) &&
+          !clean(state.next.textContent)
+      );
+
+    let state = look();
+    if (!state.heading) return fail('раздел не найден после вставки');
+    if (!state.node || !state.holder) {
+      return fail('не удалось найти вставленный материал для пустой строки');
+    }
+    if (blankAfter(state)) return { ok: true, created: false };
+
+    if (caretAfter(canvas, state.holder)) {
+      await sleep(150);
+      await pressEnter(canvas);
+      await sleep(300);
+      state = look();
+      if (blankAfter(state)) return { ok: true, created: true };
+    }
+
+    state = look();
+    if (!state.holder) {
+      return fail('вставленный материал пропал при добавлении пустой строки');
+    }
+
+    const paragraph = document.createElement('p');
+    paragraph.appendChild(document.createElement('br'));
+    state.holder.insertAdjacentElement('afterend', paragraph);
+    await sleep(300);
+
+    state = look();
+    if (!blankAfter(state)) {
+      return fail('редактор не принял пустую строку после вставки');
+    }
+    return { ok: true, created: true };
+  }
+
   // Адрес ссылки в сопоставимом виде: редактор может заменить относительный
   // href абсолютным и добавить завершающий слеш, не меняя саму цель.
   function canonicalHref(value) {
@@ -948,14 +1007,35 @@ async function kmsStep(step, payload) {
 
         // Разбор последствий вставки: заголовки на месте, прежние макеты
         // целы, новый добавился — и стоит последним в разделе.
+        const findGrid = () =>
+          insertedGrid(canvas, expected.embedded[0], knownGrids);
         const damage = damageReport(before, structureSnapshot(canvas), expected);
         const place = damage
           ? null
-          : await placeAtSectionEnd(canvas, payload.headingIndex, () =>
-              insertedGrid(canvas, expected.embedded[0], knownGrids)
-            );
+          : placeAtSectionEnd(canvas, payload.headingIndex, findGrid);
+        const blank =
+          !damage && place && place.ok
+            ? await ensureBlankLineAfter(
+                canvas,
+                payload.headingIndex,
+                findGrid
+              )
+            : null;
+        const afterBlankDamage =
+          blank && blank.ok
+            ? damageReport(before, structureSnapshot(canvas), expected)
+            : '';
+        const finalPlace =
+          blank && blank.ok && !afterBlankDamage
+            ? placeAtSectionEnd(canvas, payload.headingIndex, findGrid)
+            : place;
 
-        const problem = damage || (place && !place.ok ? place.reason : '');
+        const problem =
+          damage ||
+          (place && !place.ok ? place.reason : '') ||
+          (blank && !blank.ok ? blank.reason : '') ||
+          afterBlankDamage ||
+          (finalPlace && !finalPlace.ok ? finalPlace.reason : '');
 
         if (problem) {
           const restored = await undoTo(canvas, before);
@@ -972,7 +1052,7 @@ async function kmsStep(step, payload) {
         // важно, каким по счёту макетом встал новый.
         const section = [...canvas.querySelectorAll('h2')][payload.headingIndex];
         const grids = section ? sectionGrids(canvas, section) : [];
-        const grid = insertedGrid(canvas, expected.embedded[0], knownGrids);
+        const grid = findGrid();
         const rank = grids.indexOf(grid);
 
         return {
@@ -982,10 +1062,11 @@ async function kmsStep(step, payload) {
             where,
             position:
               rank === -1
-                ? place.position
+                ? finalPlace.position
                 : `${rank + 1}-й макет из ${grids.length}`,
-            moved: Boolean(place.moved),
-            wrong: place.wrong || '',
+            moved: Boolean(finalPlace.moved),
+            wrong: finalPlace.wrong || '',
+            blankCreated: Boolean(blank.created),
           },
         };
       }
@@ -1071,11 +1152,33 @@ async function kmsStep(step, payload) {
         const place = damage || !linkAppeared
           ? null
           : placeAtSectionEnd(canvas, payload.headingIndex, findLine);
+        const blank =
+          !damage && linkAppeared && place && place.ok
+            ? await ensureBlankLineAfter(
+                canvas,
+                payload.headingIndex,
+                findLine
+              )
+            : null;
+        const afterBlankDamage =
+          blank && blank.ok
+            ? damageReport(before, structureSnapshot(canvas), {
+                grids: 0,
+                embedded: [],
+              })
+            : '';
+        const finalPlace =
+          blank && blank.ok && !afterBlankDamage
+            ? placeAtSectionEnd(canvas, payload.headingIndex, findLine)
+            : place;
 
         const problem =
           damage ||
           (!linkAppeared ? 'вставленную ссылку не нашёл на полотне' : '') ||
-          (place && !place.ok ? place.reason : '');
+          (place && !place.ok ? place.reason : '') ||
+          (blank && !blank.ok ? blank.reason : '') ||
+          afterBlankDamage ||
+          (finalPlace && !finalPlace.ok ? finalPlace.reason : '');
 
         if (problem) {
           const restored = await undoTo(canvas, before);
@@ -1093,9 +1196,10 @@ async function kmsStep(step, payload) {
           result: {
             done: true,
             where,
-            position: place.position,
-            moved: Boolean(place.moved),
-            wrong: place.wrong || '',
+            position: finalPlace.position,
+            moved: Boolean(finalPlace.moved),
+            wrong: finalPlace.wrong || '',
+            blankCreated: Boolean(blank.created),
           },
         };
       }
